@@ -17,12 +17,13 @@ use bevy_enhanced_input::prelude::EnhancedInputPlugin;
 use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
+mod abilities;
 mod hitscan;
 mod jumppad;
 mod rockets;
 mod shared;
+use abilities::register_shoves;
 use hitscan::ExampleHitscanClientSystems;
-use jumppad::register_jump_pad_effect;
 use shared::*;
 
 const CAMERA_DISTANCE: f32 = 5.2;
@@ -126,7 +127,7 @@ impl Plugin for ClientPlugin {
             .add_observer(log_disconnected)
             .add_systems(
                 Startup,
-                (setup_client, setup_scene, setup_hud, register_jump_pad_effect),
+                (setup_client, setup_scene, setup_hud, register_shoves),
             )
             .add_systems(
                 Update,

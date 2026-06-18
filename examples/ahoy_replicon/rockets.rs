@@ -24,25 +24,16 @@ const ROCKET_DEBUG_SECONDS: f32 = 0.85;
 const FIXED_DT: f32 = (1.0 / FIXED_TIMESTEP_HZ) as f32;
 
 pub fn add_client_rockets(app: &mut App) {
-    app.add_systems(Startup, register_rocket_ability)
-        .add_systems(
-            FixedPreUpdate,
-            spawn_rocket_visual.after(ClientNetAhoySystems::Predict),
-        )
-        .add_systems(Update, update_rocket_markers);
-}
-
-pub fn add_server_rockets(app: &mut App) {
-    app.add_systems(Startup, register_rocket_ability);
-}
-
-fn register_rocket_ability(mut shoves: ResMut<Shoves>) {
-    shoves.0.push(rocket_jump);
+    app.add_systems(
+        FixedPreUpdate,
+        spawn_rocket_visual.after(ClientNetAhoySystems::Predict),
+    )
+    .add_systems(Update, update_rocket_markers);
 }
 
 /// A rocket with travel time: on fire we raycast the blast point and schedule it a
 /// few ticks out by command sequence, then push the player when that sequence lands.
-fn rocket_jump(
+pub(crate) fn rocket_jump(
     view: MoveView,
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,

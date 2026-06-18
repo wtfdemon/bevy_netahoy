@@ -11,11 +11,12 @@ use bevy_enhanced_input::prelude::EnhancedInputPlugin;
 use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
+mod abilities;
 mod hitscan;
 mod jumppad;
 mod rockets;
 mod shared;
-use jumppad::register_jump_pad_effect;
+use abilities::register_shoves;
 use shared::*;
 
 fn main() -> AppExit {
@@ -48,12 +49,11 @@ struct ServerPlugin;
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         hitscan::add_server_hitscan(app);
-        rockets::add_server_rockets(app);
 
         app.add_plugins((WebSocketServerPlugin, AeronetRepliconServerPlugin))
             .add_observer(join_player)
             .add_observer(clean_up_disconnected_player)
-            .add_systems(Startup, (setup_server, register_jump_pad_effect))
+            .add_systems(Startup, (setup_server, register_shoves))
             .add_systems(
                 FixedPreUpdate,
                 (update_flying_target, reset_fallen_players)

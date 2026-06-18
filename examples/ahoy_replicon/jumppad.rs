@@ -1,6 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use bevy_netahoy::{AhoyButtons, AhoyUserCmd, MoveView, PendingShoves, Shoves};
+use bevy_netahoy::{AhoyButtons, AhoyUserCmd, MoveView, PendingShoves};
 
 use crate::shared::JUMP_PAD_COLLISION_LAYER;
 
@@ -28,13 +28,9 @@ pub fn spawn_jump_pad_trigger(commands: &mut Commands, base: &Transform) {
     ));
 }
 
-pub fn register_jump_pad_effect(mut shoves: ResMut<Shoves>) {
-    shoves.0.push(jump_pad);
-}
-
-/// While the player's center is in the trigger, set (not add) upward speed —
-/// idempotent and replay-safe against the static jump-pad layer, so no edge detection.
-fn jump_pad(
+/// While the player's center is in the trigger, set (not add) upward speed.
+/// Idempotent against the static pad layer, so it needs no edge detection.
+pub(crate) fn jump_pad(
     view: MoveView,
     _command: &AhoyUserCmd,
     _previous_buttons: AhoyButtons,
