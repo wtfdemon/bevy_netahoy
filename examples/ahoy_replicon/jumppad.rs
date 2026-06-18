@@ -1,6 +1,6 @@
 use avian3d::prelude::*;
 use bevy::prelude::*;
-use bevy_netahoy::{AhoyButtons, AhoyUserCmd, MoveView, MovementEffects};
+use bevy_netahoy::{AhoyButtons, AhoyUserCmd, MoveView, PendingShoves, Shoves};
 
 use crate::shared::JUMP_PAD_COLLISION_LAYER;
 
@@ -28,8 +28,8 @@ pub fn spawn_jump_pad_trigger(commands: &mut Commands, base: &Transform) {
     ));
 }
 
-pub fn register_jump_pad_effect(mut effects: ResMut<MovementEffects>) {
-    effects.0.push(jump_pad);
+pub fn register_jump_pad_effect(mut shoves: ResMut<Shoves>) {
+    shoves.0.push(jump_pad);
 }
 
 /// While the player's center is in the trigger, set (not add) upward speed —
@@ -39,6 +39,7 @@ fn jump_pad(
     _command: &AhoyUserCmd,
     _previous_buttons: AhoyButtons,
     world: &SpatialQuery,
+    _pending_shoves: &mut PendingShoves,
     velocity: &mut Vec3,
 ) {
     let filter = SpatialQueryFilter::from_mask(JUMP_PAD_COLLISION_LAYER);

@@ -412,6 +412,7 @@ fn spawn_client_prediction_kcc(
             .spawn((
                 Name::new("client prediction kcc"),
                 ClientPredictionKcc { server_entity },
+                PendingShoves::default(),
                 CharacterLook {
                     yaw: look.x,
                     pitch: look.y,

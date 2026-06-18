@@ -8,7 +8,7 @@ use bevy_replicon::prelude::*;
 
 use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
-    step::{AhoyPredictionFrame, MovementEffects, NetAhoyStepper},
+    step::{AhoyPredictionFrame, NetAhoyStepper, Shoves},
     protocol::*,
 };
 
@@ -42,7 +42,7 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
-            .init_resource::<MovementEffects>()
+            .init_resource::<Shoves>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -642,9 +642,13 @@ fn reconcile_local_prediction(
     let current_position = stepper.position(predicted_entity).unwrap_or(snapshot.position);
     let old_visible_position = current_position + correction.presentation_offset;
     let replay_commands = command_history.after_sequence(snapshot.last_processed_sequence);
-    let local_state = ack_frame
-        .as_ref()
-        .map(|ack_frame| (&ack_frame.controller_state, &ack_frame.accumulated_input));
+    let local_state = ack_frame.as_ref().map(|ack_frame| {
+        (
+            &ack_frame.controller_state,
+            &ack_frame.accumulated_input,
+            &ack_frame.pending_shoves,
+        )
+    });
 
     stepper.restore(predicted_entity, snapshot, local_state);
 

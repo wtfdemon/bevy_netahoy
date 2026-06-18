@@ -11,7 +11,7 @@ use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState};
 
-/// A copy of a player (not a live query handle) handed to a [`MovementEffect`],
+/// A copy of a player (not a live query handle) handed to a [`Shove`],
 /// so [`SpatialQuery`] can be borrowed alongside. Velocity is passed separately.
 #[derive(Clone, Copy, Debug)]
 pub struct MoveView {
@@ -20,18 +20,33 @@ pub struct MoveView {
     pub look: Vec2,
 }
 
-/// A nudge to the player — jump pad, rocket blast, anything. It sees only
-/// replay-safe inputs and may change `velocity` alone, so it can't desync.
-pub type MovementEffect = fn(
+/// Per-player scratch handed to every [`Shove`] — a Quake-style POD blob for
+/// shoves that need to remember something across ticks (e.g. a rocket in flight).
+/// It rides the rollback frame, so prediction and replay stay exact. Keep it
+/// minimal: add a field only when a shove actually needs it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct PendingShoves {
+    /// Sequence a scheduled impulse is due to land. `armed == false` => idle.
+    pub due_sequence: u32,
+    /// Where the pending blast goes off (world space).
+    pub explosion: Vec3,
+    pub armed: bool,
+}
+
+/// A shove to the player — jump pad, rocket blast, anything. It sees only
+/// replay-safe inputs and may change `velocity` and its [`PendingShoves`], both of
+/// which ride the rollback frame, so it can't desync.
+pub type Shove = fn(
     view: MoveView,
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,
     world: &SpatialQuery,
+    pending_shoves: &mut PendingShoves,
     velocity: &mut Vec3,
 );
 
 #[derive(Resource, Default)]
-pub struct MovementEffects(pub Vec<MovementEffect>);
+pub struct Shoves(pub Vec<Shove>);
 
 /// Where Ahoy's own per-tick systems sit; netcode steps by hand via [`NetAhoyStepper`].
 /// Add [`NetAhoyKccRunnerPlugin`] only if you also want Ahoy running every fixed tick.
@@ -64,6 +79,7 @@ pub struct AhoyPredictionFrame {
     pub state: NetAhoyMoveState,
     pub controller_state: CharacterControllerState,
     pub accumulated_input: AccumulatedInput,
+    pub pending_shoves: PendingShoves,
 }
 
 #[derive(QueryData)]
@@ -75,6 +91,7 @@ pub struct PmoveParts {
     position: &'static mut Position,
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
+    pending_shoves: &'static mut PendingShoves,
 }
 
 /// The movement context: all the Bevy bits a step needs, so callers stay short.
@@ -91,7 +108,7 @@ pub struct NetAhoyStepper<'w, 's> {
             SpatialQuery<'w, 's>,
         ),
     >,
-    effects: Res<'w, MovementEffects>,
+    shoves: Res<'w, Shoves>,
     fixed_time: Res<'w, Time<Fixed>>,
 }
 
@@ -117,7 +134,7 @@ impl NetAhoyStepper<'_, '_> {
         self.set.p0().step_entity(entity, fixed_delta)?;
 
         // The step writes Transform; Position is what the next step reads.
-        let (view, mut velocity) = {
+        let (view, mut velocity, mut pending_shoves) = {
             let mut players = self.set.p1();
             let mut parts = players.get_mut(entity)?;
             parts.position.0 = parts.transform.translation;
@@ -127,21 +144,32 @@ impl NetAhoyStepper<'_, '_> {
                     look: Vec2::new(parts.look.yaw, parts.look.pitch),
                 },
                 parts.velocity.0,
+                *parts.pending_shoves,
             )
         };
 
-        // Effects (jump pads, rockets, ...) run here so client replay and server match.
-        // `velocity` is a local copy, so p1 stays free while p2 (SpatialQuery) is borrowed.
-        if !self.effects.0.is_empty() {
+        // Shoves (jump pads, rockets, ...) run here so client replay and server match.
+        // `velocity`/`pending_shoves` are local copies, so p1 stays free while p2
+        // (SpatialQuery) is borrowed.
+        if !self.shoves.0.is_empty() {
             // Clone the (cheap, fn-pointer) list to drop the Res borrow before p2.
-            let effects = self.effects.0.clone();
+            let shoves = self.shoves.0.clone();
             let world = self.set.p2();
-            for effect in &effects {
-                effect(view, &command, previous_buttons, &world, &mut velocity);
+            for shove in &shoves {
+                shove(
+                    view,
+                    &command,
+                    previous_buttons,
+                    &world,
+                    &mut pending_shoves,
+                    &mut velocity,
+                );
             }
 
             let mut players = self.set.p1();
-            players.get_mut(entity)?.velocity.0 = velocity;
+            let mut parts = players.get_mut(entity)?;
+            parts.velocity.0 = velocity;
+            *parts.pending_shoves = pending_shoves;
         }
         Ok(())
     }
@@ -158,6 +186,7 @@ impl NetAhoyStepper<'_, '_> {
             state: NetAhoyMoveState::from_controller_state(&parts.state),
             controller_state: parts.state.clone(),
             accumulated_input: parts.input.clone(),
+            pending_shoves: *parts.pending_shoves,
         })
     }
 
@@ -167,7 +196,7 @@ impl NetAhoyStepper<'_, '_> {
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &PendingShoves)>,
     ) {
         let mut players = self.set.p1();
         let Ok(mut parts) = players.get_mut(entity) else {
@@ -180,12 +209,14 @@ impl NetAhoyStepper<'_, '_> {
         parts.look.yaw = snapshot.look.x;
         parts.look.pitch = snapshot.look.y;
 
-        if let Some((stored_state, stored_input)) = local_state {
+        if let Some((stored_state, stored_input, stored_pending)) = local_state {
             *parts.state = stored_state.clone();
             *parts.input = stored_input.clone();
+            *parts.pending_shoves = *stored_pending;
         } else {
             *parts.state = CharacterControllerState::default();
             *parts.input = AccumulatedInput::default();
+            *parts.pending_shoves = PendingShoves::default();
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);

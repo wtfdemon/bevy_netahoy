@@ -12,7 +12,7 @@ use crate::{
     math::{
         ray_segment_capsule_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample,
     },
-    step::{MovementEffects, NetAhoyStepper},
+    step::{NetAhoyStepper, Shoves},
     protocol::*,
 };
 
@@ -34,7 +34,7 @@ impl Plugin for ServerNetAhoyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ServerTick>()
             .init_resource::<LagCompensationHistory>()
-            .init_resource::<MovementEffects>()
+            .init_resource::<Shoves>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
             .add_systems(

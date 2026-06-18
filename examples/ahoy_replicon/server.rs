@@ -114,6 +114,7 @@ fn join_player(
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
         CharacterLook::default(),
+        PendingShoves::default(),
         player_controller(),
         Collider::cylinder(0.45, 1.5),
         player_collision_layers(),
