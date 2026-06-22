@@ -8,7 +8,7 @@ use bevy_replicon::prelude::*;
 
 use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
-    step::{AhoyPredictionFrame, NetAhoyStepper, Shoves},
+    step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
 };
 
@@ -42,7 +42,6 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
-            .init_resource::<Shoves>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -646,7 +645,7 @@ fn reconcile_local_prediction(
         (
             &ack_frame.controller_state,
             &ack_frame.accumulated_input,
-            &ack_frame.pending_shoves,
+            &ack_frame.extras_state,
         )
     });
 

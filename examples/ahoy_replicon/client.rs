@@ -17,12 +17,10 @@ use bevy_enhanced_input::prelude::EnhancedInputPlugin;
 use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
-mod abilities;
 mod hitscan;
 mod jumppad;
 mod rockets;
 mod shared;
-use abilities::register_shoves;
 use hitscan::ExampleHitscanClientSystems;
 use shared::*;
 
@@ -127,7 +125,7 @@ impl Plugin for ClientPlugin {
             .add_observer(log_disconnected)
             .add_systems(
                 Startup,
-                (setup_client, setup_scene, setup_hud, register_shoves),
+                (setup_client, setup_scene, setup_hud),
             )
             .add_systems(
                 Update,
@@ -413,7 +411,7 @@ fn spawn_client_prediction_kcc(
             .spawn((
                 Name::new("client prediction kcc"),
                 ClientPredictionKcc { server_entity },
-                PendingShoves::default(),
+                MovementExtrasState::default(),
                 CharacterLook {
                     yaw: look.x,
                     pitch: look.y,
@@ -579,7 +577,7 @@ fn gather_client_input(
     buttons.set(AhoyButtons::CLIMBDOWN, keys.pressed(KeyCode::KeyZ));
     buttons.set(AhoyButtons::SWIM_UP, keys.pressed(KeyCode::Space));
     buttons.set(
-        rockets::ROCKET_FIRE,
+        ROCKET_FIRE,
         mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),
     );
     input.buttons = buttons;

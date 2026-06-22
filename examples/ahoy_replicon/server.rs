@@ -11,12 +11,10 @@ use bevy_enhanced_input::prelude::EnhancedInputPlugin;
 use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
-mod abilities;
 mod hitscan;
 mod jumppad;
 mod rockets;
 mod shared;
-use abilities::register_shoves;
 use shared::*;
 
 fn main() -> AppExit {
@@ -39,6 +37,7 @@ fn main() -> AppExit {
             AhoyPlugins::new(NetAhoyKccSchedule),
             ExampleSharedPlugin,
             ServerNetAhoyPlugin,
+            MovementExtrasPlugin,
             ServerPlugin,
         ))
         .run()
@@ -53,7 +52,7 @@ impl Plugin for ServerPlugin {
         app.add_plugins((WebSocketServerPlugin, AeronetRepliconServerPlugin))
             .add_observer(join_player)
             .add_observer(clean_up_disconnected_player)
-            .add_systems(Startup, (setup_server, register_shoves))
+            .add_systems(Startup, setup_server)
             .add_systems(
                 FixedPreUpdate,
                 (update_flying_target, reset_fallen_players)
@@ -114,7 +113,7 @@ fn join_player(
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
         CharacterLook::default(),
-        PendingShoves::default(),
+        MovementExtrasState::default(),
         player_controller(),
         Collider::cylinder(0.45, 1.5),
         player_collision_layers(),

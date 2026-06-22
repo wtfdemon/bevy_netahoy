@@ -7,6 +7,7 @@ use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_ahoy::prelude::*;
 use bevy_netahoy::{
     apply_debug_time_scale, DebugTimeScale, NetAhoyProtocolPlugin, FIXED_TIMESTEP_HZ,
+    PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
@@ -14,11 +15,6 @@ use ahoy_replicon::{HitScanAck, HitScanShot};
 
 use crate::jumppad::{spawn_jump_pad_trigger, JUMP_PAD_SIZE, JUMP_PAD_TRANSLATION};
 
-pub const WORLD_COLLISION_LAYER: LayerMask = LayerMask(1 << 0);
-pub const PLAYER_COLLISION_LAYER: LayerMask = LayerMask(1 << 1);
-/// Jump-pad trigger sensors live here. The KCC ignores sensors, so they never
-/// block movement; the jump-pad movement effect queries this layer to detect them.
-pub const JUMP_PAD_COLLISION_LAYER: LayerMask = LayerMask(1 << 2);
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
 pub const FLYING_TARGET_PLAYER_ID: u64 = 9_001;
 pub struct ExampleSharedPlugin;

@@ -9,64 +9,14 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
+use crate::extras::MovementExtrasState;
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState};
 
-/// A copy of a player (not a live query handle) handed to a [`Shove`],
-/// so [`SpatialQuery`] can be borrowed alongside. Velocity is passed separately.
-#[derive(Clone, Copy, Debug)]
-pub struct MoveView {
-    pub position: Vec3,
-    /// `x` = yaw, `y` = pitch (radians).
-    pub look: Vec2,
-}
-
-/// Per-player scratch handed to every [`Shove`] — a Quake-style POD blob for
-/// shoves that need to remember something across ticks (e.g. a rocket in flight).
-/// It rides the rollback frame, so prediction and replay stay exact. Keep it
-/// minimal: add a field only when a shove actually needs it.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub struct PendingShoves {
-    /// Sequence a scheduled impulse is due to land. `armed == false` => idle.
-    pub due_sequence: u32,
-    /// Where the pending blast goes off (world space).
-    pub explosion: Vec3,
-    pub armed: bool,
-}
-
-/// A shove to the player — jump pad, rocket blast, anything. It sees only
-/// replay-safe inputs and may change `velocity` and its [`PendingShoves`], both of
-/// which ride the rollback frame, so it can't desync.
-pub type Shove = fn(
-    view: MoveView,
-    command: &AhoyUserCmd,
-    previous_buttons: AhoyButtons,
-    world: &SpatialQuery,
-    pending_shoves: &mut PendingShoves,
-    velocity: &mut Vec3,
-);
-
-#[derive(Resource, Default)]
-pub struct Shoves(pub Vec<Shove>);
-
-/// Where Ahoy's own per-tick systems sit; netcode steps by hand via [`NetAhoyStepper`].
-/// Add [`NetAhoyKccRunnerPlugin`] only if you also want Ahoy running every fixed tick.
+/// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
+/// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
+/// itself — pass it to `AhoyPlugins::new` to keep Ahoy out of the fixed loop.
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NetAhoyKccSchedule;
-
-pub struct NetAhoyKccRunnerPlugin;
-
-impl Plugin for NetAhoyKccRunnerPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(
-            FixedPostUpdate,
-            run_net_ahoy_kcc_schedule.before(PhysicsSystems::First),
-        );
-    }
-}
-
-fn run_net_ahoy_kcc_schedule(world: &mut World) {
-    world.run_schedule(NetAhoyKccSchedule);
-}
 
 /// Everything the client needs to rewind to (and resimulate from) one
 /// predicted command.
@@ -79,7 +29,7 @@ pub struct AhoyPredictionFrame {
     pub state: NetAhoyMoveState,
     pub controller_state: CharacterControllerState,
     pub accumulated_input: AccumulatedInput,
-    pub pending_shoves: PendingShoves,
+    pub extras_state: MovementExtrasState,
 }
 
 #[derive(QueryData)]
@@ -91,7 +41,7 @@ pub struct PmoveParts {
     position: &'static mut Position,
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
-    pending_shoves: &'static mut PendingShoves,
+    extras_state: &'static mut MovementExtrasState,
 }
 
 /// The movement context: all the Bevy bits a step needs, so callers stay short.
@@ -108,7 +58,6 @@ pub struct NetAhoyStepper<'w, 's> {
             SpatialQuery<'w, 's>,
         ),
     >,
-    shoves: Res<'w, Shoves>,
     fixed_time: Res<'w, Time<Fixed>>,
 }
 
@@ -134,43 +83,48 @@ impl NetAhoyStepper<'_, '_> {
         self.set.p0().step_entity(entity, fixed_delta)?;
 
         // The step writes Transform; Position is what the next step reads.
-        let (view, mut velocity, mut pending_shoves) = {
+        let mut players = self.set.p1();
+        let mut parts = players.get_mut(entity)?;
+        parts.position.0 = parts.transform.translation;
+
+        self.handle_extras(entity, &command, previous_buttons)
+    }
+
+    /// Run the movement extras (jump pads, rockets, ...) after the KCC step, so
+    /// client replay and the server compose them identically. They need [`SpatialQuery`]
+    /// (p2) alongside velocity/extras_state (p1), and those two can't be borrowed at
+    /// once, so we copy velocity/extras_state out, run the extras, then write back.
+    fn handle_extras(
+        &mut self,
+        entity: Entity,
+        command: &AhoyUserCmd,
+        previous_buttons: AhoyButtons,
+    ) -> Result<()> {
+        let (position, look, mut velocity, mut extras_state) = {
             let mut players = self.set.p1();
-            let mut parts = players.get_mut(entity)?;
-            parts.position.0 = parts.transform.translation;
+            let parts = players.get_mut(entity)?;
             (
-                MoveView {
-                    position: parts.transform.translation,
-                    look: Vec2::new(parts.look.yaw, parts.look.pitch),
-                },
+                parts.transform.translation,
+                Vec2::new(parts.look.yaw, parts.look.pitch),
                 parts.velocity.0,
-                *parts.pending_shoves,
+                *parts.extras_state,
             )
         };
 
-        // Shoves (jump pads, rockets, ...) run here so client replay and server match.
-        // `velocity`/`pending_shoves` are local copies, so p1 stays free while p2
-        // (SpatialQuery) is borrowed.
-        if !self.shoves.0.is_empty() {
-            // Clone the (cheap, fn-pointer) list to drop the Res borrow before p2.
-            let shoves = self.shoves.0.clone();
-            let world = self.set.p2();
-            for shove in &shoves {
-                shove(
-                    view,
-                    &command,
-                    previous_buttons,
-                    &world,
-                    &mut pending_shoves,
-                    &mut velocity,
-                );
-            }
+        crate::extras::movement_extras(
+            position,
+            look,
+            command,
+            previous_buttons,
+            &self.set.p2(),
+            &mut extras_state,
+            &mut velocity,
+        );
 
-            let mut players = self.set.p1();
-            let mut parts = players.get_mut(entity)?;
-            parts.velocity.0 = velocity;
-            *parts.pending_shoves = pending_shoves;
-        }
+        let mut players = self.set.p1();
+        let mut parts = players.get_mut(entity)?;
+        parts.velocity.0 = velocity;
+        *parts.extras_state = extras_state;
         Ok(())
     }
 
@@ -186,7 +140,7 @@ impl NetAhoyStepper<'_, '_> {
             state: NetAhoyMoveState::from_controller_state(&parts.state),
             controller_state: parts.state.clone(),
             accumulated_input: parts.input.clone(),
-            pending_shoves: *parts.pending_shoves,
+            extras_state: *parts.extras_state,
         })
     }
 
@@ -196,7 +150,7 @@ impl NetAhoyStepper<'_, '_> {
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &PendingShoves)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &MovementExtrasState)>,
     ) {
         let mut players = self.set.p1();
         let Ok(mut parts) = players.get_mut(entity) else {
@@ -209,14 +163,14 @@ impl NetAhoyStepper<'_, '_> {
         parts.look.yaw = snapshot.look.x;
         parts.look.pitch = snapshot.look.y;
 
-        if let Some((stored_state, stored_input, stored_pending)) = local_state {
+        if let Some((stored_state, stored_input, stored_extras)) = local_state {
             *parts.state = stored_state.clone();
             *parts.input = stored_input.clone();
-            *parts.pending_shoves = *stored_pending;
+            *parts.extras_state = *stored_extras;
         } else {
             *parts.state = CharacterControllerState::default();
             *parts.input = AccumulatedInput::default();
-            *parts.pending_shoves = PendingShoves::default();
+            *parts.extras_state = MovementExtrasState::default();
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
