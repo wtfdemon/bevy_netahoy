@@ -718,6 +718,8 @@ fn update_local_presentation_from_prediction(
 
         presentation_transform.translation =
             prediction_transform.translation + correction.presentation_offset;
-        presentation_transform.rotation = prediction_transform.rotation;
+        // Rotation is owned by the game's animation layer, which faces the model
+        // toward the run direction (CharacterLook.yaw). The KCC transform stays at
+        // identity, so syncing it here would stomp that facing every frame.
     }
 }

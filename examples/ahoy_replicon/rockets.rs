@@ -29,6 +29,7 @@ fn spawn_rocket_visual(
     input: Res<ClientInput>,
     mut fired: Local<bool>,
     player: Query<(&Transform, &CharacterLook), With<ClientPredictionKcc>>,
+    extras_config: Option<Res<MovementExtrasPlugin>>,
     spatial: SpatialQuery,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -45,13 +46,17 @@ fn spawn_rocket_visual(
         return;
     };
     let look = Vec2::new(look.yaw, look.pitch);
+    // Match the server's tuning when present so the marker lands where the real
+    // blast will; the client predictor skips the plugin, so default otherwise.
+    let config = extras_config.as_deref().copied().unwrap_or_default();
     // The marker shows up right away even though the real blast has travel time.
     // It only marks where the rocket will land, so that is fine for now.
-    let Some((explosion, _distance)) = rocket_explosion_point(transform.translation, look, &spatial)
+    let Some((explosion, _distance)) =
+        rocket_explosion_point(transform.translation, look, &spatial, &config)
     else {
         return;
     };
-    let origin = transform.translation + Vec3::Y * ROCKET_EYE_HEIGHT;
+    let origin = transform.translation + Vec3::Y * config.rocket_eye_height;
 
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.1, 0.9, 1.0, 0.7),

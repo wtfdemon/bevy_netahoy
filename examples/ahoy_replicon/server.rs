@@ -37,7 +37,7 @@ fn main() -> AppExit {
             AhoyPlugins::new(NetAhoyKccSchedule),
             ExampleSharedPlugin,
             ServerNetAhoyPlugin,
-            MovementExtrasPlugin,
+            MovementExtrasPlugin::default(),
             ServerPlugin,
         ))
         .run()

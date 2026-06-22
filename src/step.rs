@@ -9,7 +9,7 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
-use crate::extras::MovementExtrasState;
+use crate::extras::{MovementExtrasPlugin, MovementExtrasState};
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState};
 
 /// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
@@ -59,6 +59,9 @@ pub struct NetAhoyStepper<'w, 's> {
         ),
     >,
     fixed_time: Res<'w, Time<Fixed>>,
+    // Absent on sides that skip MovementExtrasPlugin (e.g. the client predictor),
+    // so fall back to the shipped defaults rather than requiring the resource.
+    extras_config: Option<Res<'w, MovementExtrasPlugin>>,
 }
 
 impl NetAhoyStepper<'_, '_> {
@@ -100,6 +103,7 @@ impl NetAhoyStepper<'_, '_> {
         command: &AhoyUserCmd,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
+        let config = self.extras_config.as_deref().copied().unwrap_or_default();
         let (position, look, mut velocity, mut extras_state) = {
             let mut players = self.set.p1();
             let parts = players.get_mut(entity)?;
@@ -117,6 +121,7 @@ impl NetAhoyStepper<'_, '_> {
             command,
             previous_buttons,
             &self.set.p2(),
+            &config,
             &mut extras_state,
             &mut velocity,
         );

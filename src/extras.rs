@@ -21,16 +21,8 @@ pub const JUMP_PAD_COLLISION_LAYER: LayerMask = LayerMask(1 << 2);
 /// use `from_bits_retain` to keep it.
 pub const ROCKET_FIRE: AhoyButtons = AhoyButtons::from_bits_retain(1 << 16);
 
-pub const ROCKET_EYE_HEIGHT: f32 = 0.6;
-const ROCKET_SPEED: f32 = 42.0;
-const ROCKET_LIFETIME_SECONDS: f32 = 1.35;
-const ROCKET_MAX_DISTANCE: f32 = ROCKET_SPEED * ROCKET_LIFETIME_SECONDS;
-const ROCKET_SPLASH_RADIUS: f32 = 4.0;
-const ROCKET_IMPULSE_SPEED: f32 = 42.0;
 /// Seconds per fixed tick. Travel time gets rounded to a whole number of these.
 const FIXED_DT: f32 = (1.0 / FIXED_TIMESTEP_HZ) as f32;
-
-const JUMP_PAD_VERTICAL_SPEED: f32 = 50.0;
 
 /// Per-player scratch handed to every movement extra — a Quake-style POD blob for
 /// effects that remember something across ticks (e.g. a rocket in flight). It rides
@@ -58,16 +50,17 @@ pub fn movement_extras(
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,
     world: &SpatialQuery,
+    config: &MovementExtrasPlugin,
     state: &mut MovementExtrasState,
     velocity: &mut Vec3,
 ) {
-    jump_pad(position, world, velocity);
-    rocket_jump(position, look, command, previous_buttons, world, state, velocity);
+    jump_pad(position, world, config, velocity);
+    rocket_jump(position, look, command, previous_buttons, world, config, state, velocity);
 }
 
 /// While the player's center is in a jump-pad trigger, set (not add) upward speed.
 /// Idempotent against the static pad layer, so it needs no edge detection.
-fn jump_pad(position: Vec3, world: &SpatialQuery, velocity: &mut Vec3) {
+fn jump_pad(position: Vec3, world: &SpatialQuery, config: &MovementExtrasPlugin, velocity: &mut Vec3) {
     let filter = SpatialQueryFilter::from_mask(JUMP_PAD_COLLISION_LAYER);
     let mut on_pad = false;
     world.point_intersections_callback(position, &filter, |_| {
@@ -75,7 +68,7 @@ fn jump_pad(position: Vec3, world: &SpatialQuery, velocity: &mut Vec3) {
         false // first hit is enough
     });
     if on_pad {
-        velocity.y = JUMP_PAD_VERTICAL_SPEED;
+        velocity.y = config.jump_pad_vertical_speed;
     }
 }
 
@@ -87,17 +80,18 @@ fn rocket_jump(
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,
     world: &SpatialQuery,
+    config: &MovementExtrasPlugin,
     state: &mut MovementExtrasState,
     velocity: &mut Vec3,
 ) {
     let firing = command.buttons.contains(ROCKET_FIRE);
     let was_firing = previous_buttons.contains(ROCKET_FIRE);
     if firing && !was_firing
-        && let Some((explosion, distance)) = rocket_explosion_point(position, look, world)
+        && let Some((explosion, distance)) = rocket_explosion_point(position, look, world, config)
     {
         // One rocket per player, so a new shot replaces the old. It lives in the
         // rollback blob, so client and server land it the same.
-        let ticks = (distance / ROCKET_SPEED / FIXED_DT).round() as u32;
+        let ticks = (distance / config.rocket_speed / FIXED_DT).round() as u32;
         state.explosion = explosion;
         state.due_sequence = command.sequence.wrapping_add(ticks);
         state.armed = true;
@@ -106,7 +100,7 @@ fn rocket_jump(
     // When it's due, push the player based on where they are right now, so a far
     // shot only launches you if you're still near the blast when it lands.
     if state.armed && state.due_sequence == command.sequence {
-        *velocity += rocket_impulse(state.explosion, position);
+        *velocity += rocket_impulse(state.explosion, position, config);
         // Mark it for the server to splash everyone else (the firer is already pushed).
         state.detonated = Some(state.explosion);
         state.armed = false;
@@ -120,24 +114,26 @@ pub fn rocket_explosion_point(
     position: Vec3,
     look: Vec2,
     world: &SpatialQuery,
+    config: &MovementExtrasPlugin,
 ) -> Option<(Vec3, f32)> {
     let rotation = Quat::from_euler(EulerRot::YXZ, look.x, look.y, 0.0);
     let direction = (rotation * Vec3::NEG_Z).normalize_or_zero();
     let ray_direction = Dir3::new(direction).ok()?;
-    let origin = position + Vec3::Y * ROCKET_EYE_HEIGHT;
+    let origin = position + Vec3::Y * config.rocket_eye_height;
 
+    let max_distance = config.rocket_max_distance();
     let filter = SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER);
     let distance = world
-        .cast_ray(origin, ray_direction, ROCKET_MAX_DISTANCE, true, &filter)
+        .cast_ray(origin, ray_direction, max_distance, true, &filter)
         .map(|hit| hit.distance)
-        .unwrap_or(ROCKET_MAX_DISTANCE);
+        .unwrap_or(max_distance);
     Some((origin + direction * distance, distance))
 }
 
-fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
+fn rocket_impulse(explosion: Vec3, player: Vec3, config: &MovementExtrasPlugin) -> Vec3 {
     let to_player = player - explosion;
     let distance = to_player.length();
-    if distance >= ROCKET_SPLASH_RADIUS {
+    if distance >= config.rocket_splash_radius {
         return Vec3::ZERO;
     }
     let direction = if distance > 0.001 {
@@ -145,14 +141,15 @@ fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
     } else {
         Vec3::Y
     };
-    let falloff = 1.0 - distance / ROCKET_SPLASH_RADIUS;
-    direction * (ROCKET_IMPULSE_SPEED * falloff)
+    let falloff = 1.0 - distance / config.rocket_splash_radius;
+    direction * (config.rocket_impulse_speed * falloff)
 }
 
 /// Server-only: when a rocket detonates, push every *other* player caught in the
 /// blast. Remote players aren't predicted, so this rides the snapshot stream down
 /// to clients; the firer already got its predicted self-knockback in [`rocket_jump`].
 pub fn splash_other_players(
+    config: Res<MovementExtrasPlugin>,
     mut players: Query<(Entity, &Position, &mut LinearVelocity, &mut MovementExtrasState)>,
 ) {
     // Collect this tick's blasts first (clears the markers) so the inner loop can
@@ -165,20 +162,52 @@ pub fn splash_other_players(
     for (firer, explosion) in blasts {
         for (entity, position, mut velocity, _) in &mut players {
             if entity != firer {
-                velocity.0 += rocket_impulse(explosion, position.0);
+                velocity.0 += rocket_impulse(explosion, position.0, &config);
             }
         }
     }
 }
 
-/// Adds the server-only [`splash_other_players`] pass after commands are applied.
-/// The per-player effects themselves run inside the movement step, so they need no
-/// plugin — add this on the server to let blasts shove the rest of the field.
-pub struct MovementExtrasPlugin;
+/// The movement-shooter tuning knobs, and the plugin that ships them. Add this on
+/// the server to wire the server-only [`splash_other_players`] pass *and* publish
+/// these values as a resource the movement step reads; `default()` is the shipped
+/// game feel. The per-player effects run inside the movement step, so when a side
+/// (e.g. the client predictor) skips the plugin the step falls back to `default()`.
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct MovementExtrasPlugin {
+    /// Camera/muzzle height the rocket raycast fires from.
+    pub rocket_eye_height: f32,
+    pub rocket_speed: f32,
+    pub rocket_lifetime_seconds: f32,
+    pub rocket_splash_radius: f32,
+    pub rocket_impulse_speed: f32,
+    pub jump_pad_vertical_speed: f32,
+}
+
+impl Default for MovementExtrasPlugin {
+    fn default() -> Self {
+        Self {
+            rocket_eye_height: 0.6,
+            rocket_speed: 42.0,
+            rocket_lifetime_seconds: 1.35,
+            rocket_splash_radius: 4.0,
+            rocket_impulse_speed: 42.0,
+            jump_pad_vertical_speed: 50.0,
+        }
+    }
+}
+
+impl MovementExtrasPlugin {
+    /// How far a rocket travels before it expires. Derived, so retuning speed or
+    /// lifetime can't leave a stale max distance behind.
+    fn rocket_max_distance(&self) -> f32 {
+        self.rocket_speed * self.rocket_lifetime_seconds
+    }
+}
 
 impl Plugin for MovementExtrasPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.insert_resource(*self).add_systems(
             FixedPreUpdate,
             splash_other_players.after(ServerNetAhoySystems::ApplyCommands),
         );
