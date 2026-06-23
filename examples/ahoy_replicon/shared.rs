@@ -45,8 +45,28 @@ pub struct WorldBox {
     pub color: Color,
 }
 
-pub fn world_boxes() -> [WorldBox; 7] {
+pub fn world_boxes() -> [WorldBox; 9] {
     [
+        // Too tall to land on with a jump (apex ~jump_height 1.8m < 2.4m top),
+        // but jump + crane (reach 1.5m) climbs the face and mantle (hands reach
+        // ~1.0m) pulls over the lip. Run at it, jump, hold Space.
+        WorldBox {
+            name: "crane + mantle block",
+            translation: Vec3::new(4.0, 1.2, 6.0),
+            size: Vec3::new(3.0, 2.4, 2.0),
+            rotation: Quat::IDENTITY,
+            color: Color::srgb(0.28, 0.50, 0.42),
+        },
+        // Tall, long wall to run alongside and tic-tac off of. Approach it
+        // glancing (roughly parallel) while airborne — a head-on angle is
+        // rejected by Ahoy's max_tac_cos.
+        WorldBox {
+            name: "tic tac wall",
+            translation: Vec3::new(10.5, 4.0, 4.0),
+            size: Vec3::new(0.6, 8.0, 12.0),
+            rotation: Quat::IDENTITY,
+            color: Color::srgb(0.50, 0.30, 0.35),
+        },
         WorldBox {
             name: "floor",
             translation: Vec3::new(0.0, -0.2, 0.0),

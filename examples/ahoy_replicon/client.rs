@@ -571,9 +571,21 @@ fn gather_client_input(
         AhoyButtons::CROUCH,
         keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC),
     );
-    buttons.set(AhoyButtons::TAC, keys.pressed(KeyCode::ShiftLeft));
-    buttons.set(AhoyButtons::MANTLE, keys.pressed(KeyCode::KeyE));
-    buttons.set(AhoyButtons::CRANE, keys.pressed(KeyCode::KeyQ));
+    // Tac shares the jump button, exactly like Ahoy (Space drives jump/tac/
+    // crane/mantle and the state machine picks). ShiftLeft kept to isolate-test.
+    buttons.set(
+        AhoyButtons::TAC,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ShiftLeft),
+    );
+    // Like Ahoy, Space also drives crane + mantle; E/Q kept to isolate-test.
+    buttons.set(
+        AhoyButtons::MANTLE,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyE),
+    );
+    buttons.set(
+        AhoyButtons::CRANE,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyQ),
+    );
     buttons.set(AhoyButtons::CLIMBDOWN, keys.pressed(KeyCode::KeyZ));
     buttons.set(AhoyButtons::SWIM_UP, keys.pressed(KeyCode::Space));
     buttons.set(
