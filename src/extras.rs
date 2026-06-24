@@ -1,10 +1,13 @@
-//! The movement-shooter batteries: jump pads, rocket jumps, rocket splash. Read
-//! this one file to see everything the library does beyond plain movement, and
-//! hack away. Every effect runs inside the movement step ([`movement_extras`]),
+//! The movement-shooter batteries: easy movement, jump pads, rocket jumps,
+//! rocket splash. Read this one file to see everything the library does beyond
+//! plain movement, and hack away. Every effect runs inside the movement step,
 //! so client prediction, replay, and the server all compose them identically.
 
+use std::f32::consts::{PI, TAU};
+
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{prelude::*, time::Stopwatch};
+use bevy_ahoy::input::AccumulatedInput;
 
 use crate::protocol::{AhoyButtons, AhoyUserCmd, FIXED_TIMESTEP_HZ};
 use crate::server::ServerNetAhoySystems;
@@ -41,8 +44,42 @@ pub struct MovementExtrasState {
     pub detonated: Option<Vec3>,
 }
 
-/// Run every movement extra for one player, in one fixed order. Order is
-/// load-bearing: [`jump_pad`] sets vertical speed and [`rocket_jump`] adds to it.
+/// Shape friendly movement inputs before Ahoy consumes them.
+pub fn movement_pre_think(
+    command: &AhoyUserCmd,
+    previous_look: Vec2,
+    config: &MovementExtrasPlugin,
+    input: &mut AccumulatedInput,
+    airborne: bool,
+) {
+    let jump_held = command.buttons.contains(AhoyButtons::JUMP);
+    if config.auto_hop && jump_held {
+        input.jumped = Some(Stopwatch::new());
+    }
+
+    let yaw_delta = wrap_angle(command.look.x - previous_look.x);
+    let movement = input.last_movement.unwrap_or_default();
+    let holding_forward = movement.y > 0.0;
+    let manual_strafe = movement.x.abs() >= 0.1;
+    if config.auto_strafe
+        && jump_held
+        && airborne
+        && holding_forward
+        && !manual_strafe
+        && yaw_delta.abs() > config.auto_strafe_yaw_deadzone
+    {
+        input.last_movement = Some(
+            Vec2::new(
+                -yaw_delta.signum() * config.auto_strafe_strength.clamp(0.0, 1.0),
+                0.0,
+            )
+            .clamp_length_max(1.0),
+        );
+    }
+}
+
+/// Run every post-KCC movement extra for one player, in one fixed order. Order
+/// is load-bearing: [`jump_pad`] sets vertical speed and [`rocket_jump`] adds to it.
 /// Called from the movement step, so client and server always compose them the same.
 pub fn movement_extras(
     position: Vec3,
@@ -145,6 +182,10 @@ fn rocket_impulse(explosion: Vec3, player: Vec3, config: &MovementExtrasPlugin) 
     direction * (config.rocket_impulse_speed * falloff)
 }
 
+fn wrap_angle(angle: f32) -> f32 {
+    (angle + PI).rem_euclid(TAU) - PI
+}
+
 /// Server-only: when a rocket detonates, push every *other* player caught in the
 /// blast. Remote players aren't predicted, so this rides the snapshot stream down
 /// to clients; the firer already got its predicted self-knockback in [`rocket_jump`].
@@ -175,6 +216,13 @@ pub fn splash_other_players(
 /// (e.g. the client predictor) skips the plugin the step falls back to `default()`.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct MovementExtrasPlugin {
+    /// Holding jump refreshes Ahoy's jump buffer, so landing immediately hops.
+    pub auto_hop: bool,
+    /// Holding forward + jump adds strafe toward mouse yaw while airborne.
+    pub auto_strafe: bool,
+    pub auto_strafe_yaw_deadzone: f32,
+    /// `1.0` is full side input; lower values are gentler.
+    pub auto_strafe_strength: f32,
     /// Camera/muzzle height the rocket raycast fires from.
     pub rocket_eye_height: f32,
     pub rocket_speed: f32,
@@ -187,6 +235,10 @@ pub struct MovementExtrasPlugin {
 impl Default for MovementExtrasPlugin {
     fn default() -> Self {
         Self {
+            auto_hop: true,
+            auto_strafe: true,
+            auto_strafe_yaw_deadzone: 0.003,
+            auto_strafe_strength: 1.0,
             rocket_eye_height: 0.6,
             rocket_speed: 42.0,
             rocket_lifetime_seconds: 1.35,
@@ -194,6 +246,40 @@ impl Default for MovementExtrasPlugin {
             rocket_impulse_speed: 42.0,
             jump_pad_vertical_speed: 50.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jump_command(look_x: f32) -> AhoyUserCmd {
+        AhoyUserCmd {
+            look: Vec2::new(look_x, 0.0),
+            buttons: AhoyButtons::JUMP,
+            ..default()
+        }
+    }
+
+    #[test]
+    fn easy_movement_refreshes_jump_and_respects_manual_strafe() {
+        let config = MovementExtrasPlugin::default();
+        let mut input = AccumulatedInput {
+            last_movement: Some(Vec2::Y),
+            ..default()
+        };
+
+        movement_pre_think(&jump_command(-0.2), Vec2::ZERO, &config, &mut input, true);
+
+        assert!(input.jumped.is_some());
+        let assisted = input.last_movement.unwrap();
+        assert!(assisted.x > 0.0);
+        assert_eq!(assisted.y, 0.0);
+
+        input.last_movement = Some(Vec2::new(-1.0, 1.0).clamp_length_max(1.0));
+        movement_pre_think(&jump_command(-0.2), Vec2::ZERO, &config, &mut input, true);
+
+        assert!(input.last_movement.unwrap().x < 0.0);
     }
 }
 

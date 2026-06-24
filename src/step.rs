@@ -74,13 +74,23 @@ impl NetAhoyStepper<'_, '_> {
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
         let fixed_delta = self.fixed_time.timestep();
+        let extras_config = self.extras_config.as_deref().copied().unwrap_or_default();
 
         {
             let mut players = self.set.p1();
             let mut parts = players.get_mut(entity)?;
             tick_input_timers(&mut parts.input, fixed_delta);
             clear_transient_input(&mut parts.input);
+            let previous_look = Vec2::new(parts.look.yaw, parts.look.pitch);
             apply_usercmd(&mut parts.input, &mut parts.look, command, previous_buttons);
+            let airborne = parts.state.grounded.is_none();
+            crate::extras::movement_pre_think(
+                &command,
+                previous_look,
+                &extras_config,
+                &mut parts.input,
+                airborne,
+            );
         }
 
         self.set.p0().step_entity(entity, fixed_delta)?;
