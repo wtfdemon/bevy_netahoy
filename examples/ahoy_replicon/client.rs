@@ -18,7 +18,6 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
-mod jumppad;
 mod rockets;
 mod shared;
 use hitscan::ExampleHitscanClientSystems;
@@ -411,7 +410,6 @@ fn spawn_client_prediction_kcc(
             .spawn((
                 Name::new("client prediction kcc"),
                 ClientPredictionKcc { server_entity },
-                MovementExtrasState::default(),
                 CharacterLook {
                     yaw: look.x,
                     pitch: look.y,

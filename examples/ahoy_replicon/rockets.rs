@@ -1,6 +1,6 @@
 //! Client-only rocket eye candy. The blast simulation lives in the library
-//! (`bevy_netahoy::extras`); this just draws the trail and explosion marker by
-//! tracing the same `rocket_explosion_point` off the predicted player.
+//! (`bevy_netahoy::world`); this just draws the trail and explosion marker by
+//! tracing the same rocket the predictor fires off the predicted player.
 #![allow(dead_code)]
 
 use avian3d::prelude::*;
@@ -29,7 +29,6 @@ fn spawn_rocket_visual(
     input: Res<ClientInput>,
     mut fired: Local<bool>,
     player: Query<(&Transform, &CharacterLook), With<ClientPredictionKcc>>,
-    extras_config: Option<Res<MovementExtrasPlugin>>,
     spatial: SpatialQuery,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -46,17 +45,12 @@ fn spawn_rocket_visual(
         return;
     };
     let look = Vec2::new(look.yaw, look.pitch);
-    // Match the server's tuning when present so the marker lands where the real
-    // blast will; the client predictor skips the plugin, so default otherwise.
-    let config = extras_config.as_deref().copied().unwrap_or_default();
-    // The marker shows up right away even though the real blast has travel time.
-    // It only marks where the rocket will land, so that is fine for now.
-    let Some((explosion, _distance)) =
-        rocket_explosion_point(transform.translation, look, &spatial, &config)
-    else {
-        return;
-    };
-    let origin = transform.translation + Vec3::Y * config.rocket_eye_height;
+    // Trace the same rocket the predictor will fire, so the marker lands where the
+    // real blast goes off. It shows immediately even though the blast has travel
+    // time; it only marks the landing spot, which is fine for now.
+    let rocket = Rocket::fire(PlayerId::default(), 0, transform.translation, look, &spatial);
+    let origin = rocket.start;
+    let explosion = rocket.detonation_point();
 
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.1, 0.9, 1.0, 0.7),

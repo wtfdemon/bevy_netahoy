@@ -9,8 +9,9 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
-use crate::extras::{MovementExtrasPlugin, MovementExtrasState};
-use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState};
+use crate::client::LocalPlayerId;
+use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
+use crate::world::{step_rockets, PredictWorld};
 
 /// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
 /// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
@@ -29,7 +30,6 @@ pub struct AhoyPredictionFrame {
     pub state: NetAhoyMoveState,
     pub controller_state: CharacterControllerState,
     pub accumulated_input: AccumulatedInput,
-    pub extras_state: MovementExtrasState,
 }
 
 #[derive(QueryData)]
@@ -41,7 +41,9 @@ pub struct PmoveParts {
     position: &'static mut Position,
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
-    extras_state: &'static mut MovementExtrasState,
+    // Present on the server (replicated); absent on the client predicted entity,
+    // which falls back to LocalPlayerId for rocket ownership.
+    player_id: Option<&'static PlayerId>,
 }
 
 /// The movement context: all the Bevy bits a step needs, so callers stay short.
@@ -59,9 +61,11 @@ pub struct NetAhoyStepper<'w, 's> {
         ),
     >,
     fixed_time: Res<'w, Time<Fixed>>,
-    // Absent on sides that skip MovementExtrasPlugin (e.g. the client predictor),
-    // so fall back to the shipped defaults rather than requiring the resource.
-    extras_config: Option<Res<'w, MovementExtrasPlugin>>,
+    // The rocket world both peers step. Optional so a peer that skips it just
+    // runs movement without rockets (and the borrow stays clean).
+    predict_world: Option<ResMut<'w, PredictWorld>>,
+    // Client-only; lets the predicted entity (no PlayerId) own its rockets.
+    local_id: Option<Res<'w, LocalPlayerId>>,
 }
 
 impl NetAhoyStepper<'_, '_> {
@@ -90,47 +94,55 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
 
-        self.handle_extras(entity, &command, previous_buttons)
+        self.handle_rockets(entity, &command, previous_buttons)
     }
 
-    /// Run the movement extras (jump pads, rockets, ...) after the KCC step, so
-    /// client replay and the server compose them identically. They need [`SpatialQuery`]
-    /// (p2) alongside velocity/extras_state (p1), and those two can't be borrowed at
-    /// once, so we copy velocity/extras_state out, run the extras, then write back.
-    fn handle_extras(
+    /// Step this player's rockets after the KCC step, so client replay and the
+    /// server compose identically. `step_rockets` needs [`SpatialQuery`] (p2)
+    /// alongside velocity (p1), which can't be borrowed at once, so we copy
+    /// velocity out, run it, then write back.
+    fn handle_rockets(
         &mut self,
         entity: Entity,
         command: &AhoyUserCmd,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
-        let config = self.extras_config.as_deref().copied().unwrap_or_default();
-        let (position, look, mut velocity, mut extras_state) = {
+        let Some(_) = self.predict_world.as_ref() else {
+            return Ok(());
+        };
+        let (position, look, mut velocity, owner) = {
             let mut players = self.set.p1();
             let parts = players.get_mut(entity)?;
+            // Server entities carry PlayerId; the client predicted entity doesn't,
+            // so fall back to the local player.
+            let owner = parts
+                .player_id
+                .copied()
+                .or_else(|| self.local_id.as_ref().and_then(|l| l.0).map(PlayerId))
+                .unwrap_or_default();
             (
                 parts.transform.translation,
                 Vec2::new(parts.look.yaw, parts.look.pitch),
                 parts.velocity.0,
-                *parts.extras_state,
+                owner,
             )
         };
 
-        crate::extras::movement_extras(
-            position,
-            look,
-            command,
-            previous_buttons,
-            &self.set.p2(),
-            &config,
-            &mut extras_state,
-            &mut velocity,
-        );
+        let world = self.predict_world.as_deref_mut().unwrap();
+        step_rockets(world, owner, command, previous_buttons, position, look, &self.set.p2(), &mut velocity);
 
         let mut players = self.set.p1();
         let mut parts = players.get_mut(entity)?;
         parts.velocity.0 = velocity;
-        *parts.extras_state = extras_state;
         Ok(())
+    }
+
+    /// Client rewind hook: drop the local player's rockets fired after the acked
+    /// sequence so the replay can re-fire them. No-op where there's no rocket world.
+    pub fn prune_rockets(&mut self, owner: PlayerId, ack: u32) {
+        if let Some(world) = self.predict_world.as_deref_mut() {
+            world.prune_after(owner, ack);
+        }
     }
 
     /// Record the post-step state for `command` so it can be restored later.
@@ -145,7 +157,6 @@ impl NetAhoyStepper<'_, '_> {
             state: NetAhoyMoveState::from_controller_state(&parts.state),
             controller_state: parts.state.clone(),
             accumulated_input: parts.input.clone(),
-            extras_state: *parts.extras_state,
         })
     }
 
@@ -155,7 +166,7 @@ impl NetAhoyStepper<'_, '_> {
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &MovementExtrasState)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
     ) {
         let mut players = self.set.p1();
         let Ok(mut parts) = players.get_mut(entity) else {
@@ -168,14 +179,12 @@ impl NetAhoyStepper<'_, '_> {
         parts.look.yaw = snapshot.look.x;
         parts.look.pitch = snapshot.look.y;
 
-        if let Some((stored_state, stored_input, stored_extras)) = local_state {
+        if let Some((stored_state, stored_input)) = local_state {
             *parts.state = stored_state.clone();
             *parts.input = stored_input.clone();
-            *parts.extras_state = *stored_extras;
         } else {
             *parts.state = CharacterControllerState::default();
             *parts.input = AccumulatedInput::default();
-            *parts.extras_state = MovementExtrasState::default();
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);

@@ -13,8 +13,6 @@ use bevy_replicon::prelude::*;
 
 use ahoy_replicon::{HitScanAck, HitScanShot};
 
-use crate::jumppad::{spawn_jump_pad_trigger, JUMP_PAD_SIZE, JUMP_PAD_TRANSLATION};
-
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
 pub const FLYING_TARGET_PLAYER_ID: u64 = 9_001;
 pub struct ExampleSharedPlugin;
@@ -45,7 +43,7 @@ pub struct WorldBox {
     pub color: Color,
 }
 
-pub fn world_boxes() -> [WorldBox; 9] {
+pub fn world_boxes() -> [WorldBox; 8] {
     [
         // Too tall to land on with a jump (apex ~jump_height 1.8m < 2.4m top),
         // but jump + crane (reach 1.5m) climbs the face and mantle (hands reach
@@ -109,13 +107,6 @@ pub fn world_boxes() -> [WorldBox; 9] {
             rotation: Quat::IDENTITY,
             color: Color::srgb(0.45, 0.38, 0.30),
         },
-        WorldBox {
-            name: "jump pad",
-            translation: JUMP_PAD_TRANSLATION,
-            size: JUMP_PAD_SIZE,
-            rotation: Quat::IDENTITY,
-            color: Color::srgb(0.95, 0.25, 0.75),
-        },
     ]
 }
 
@@ -126,11 +117,6 @@ pub fn spawn_world_colliders(commands: &mut Commands) {
             rotation: world_box.rotation,
             ..default()
         };
-
-        if world_box.name == "jump pad" {
-            spawn_jump_pad_trigger(commands, &transform);
-            continue;
-        }
 
         commands.spawn((
             Name::new(world_box.name),

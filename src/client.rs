@@ -10,6 +10,7 @@ use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
+    world::{PredictWorld, clear_predicted_detonations},
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
@@ -42,6 +43,7 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
+            .init_resource::<PredictWorld>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -60,7 +62,7 @@ impl Plugin for ClientNetAhoyPlugin {
                     .run_if(in_state(ClientState::Connected))
                     .in_set(ClientNetAhoySystems::Predict),
             )
-            .add_systems(FixedLast, record_prediction_state)
+            .add_systems(FixedLast, (record_prediction_state, clear_predicted_detonations))
             .add_systems(
                 Update,
                 (
@@ -641,15 +643,13 @@ fn reconcile_local_prediction(
     let current_position = stepper.position(predicted_entity).unwrap_or(snapshot.position);
     let old_visible_position = current_position + correction.presentation_offset;
     let replay_commands = command_history.after_sequence(snapshot.last_processed_sequence);
-    let local_state = ack_frame.as_ref().map(|ack_frame| {
-        (
-            &ack_frame.controller_state,
-            &ack_frame.accumulated_input,
-            &ack_frame.extras_state,
-        )
-    });
+    let local_state = ack_frame
+        .as_ref()
+        .map(|ack_frame| (&ack_frame.controller_state, &ack_frame.accumulated_input));
 
     stepper.restore(predicted_entity, snapshot, local_state);
+    // Drop our rockets fired after the ack; the replay below re-fires them.
+    stepper.prune_rockets(PlayerId(local_id), snapshot.last_processed_sequence);
 
     let replayed = replay_commands.len();
     let mut previous_buttons = snapshot.last_processed_buttons;

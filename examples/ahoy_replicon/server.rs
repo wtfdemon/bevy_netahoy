@@ -12,7 +12,6 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
-mod jumppad;
 mod rockets;
 mod shared;
 use shared::*;
@@ -37,7 +36,6 @@ fn main() -> AppExit {
             AhoyPlugins::new(NetAhoyKccSchedule),
             ExampleSharedPlugin,
             ServerNetAhoyPlugin,
-            MovementExtrasPlugin::default(),
             ServerPlugin,
         ))
         .run()
@@ -113,7 +111,6 @@ fn join_player(
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
         CharacterLook::default(),
-        MovementExtrasState::default(),
         player_controller(),
         Collider::cylinder(0.45, 1.5),
         player_collision_layers(),
