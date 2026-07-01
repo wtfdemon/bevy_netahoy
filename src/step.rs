@@ -11,7 +11,7 @@ use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
 use crate::client::LocalPlayerId;
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
-use crate::world::{step_rockets, PredictWorld};
+use crate::world::{step_rockets, NetAhoyWorld};
 
 /// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
 /// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
@@ -63,7 +63,7 @@ pub struct NetAhoyStepper<'w, 's> {
     fixed_time: Res<'w, Time<Fixed>>,
     // The rocket world both peers step. Optional so a peer that skips it just
     // runs movement without rockets (and the borrow stays clean).
-    predict_world: Option<ResMut<'w, PredictWorld>>,
+    netahoy_world: Option<ResMut<'w, NetAhoyWorld>>,
     // Client-only; lets the predicted entity (no PlayerId) own its rockets.
     local_id: Option<Res<'w, LocalPlayerId>>,
 }
@@ -107,7 +107,7 @@ impl NetAhoyStepper<'_, '_> {
         command: &AhoyUserCmd,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
-        let Some(_) = self.predict_world.as_ref() else {
+        let Some(_) = self.netahoy_world.as_ref() else {
             return Ok(());
         };
         let (position, look, mut velocity, owner) = {
@@ -128,8 +128,17 @@ impl NetAhoyStepper<'_, '_> {
             )
         };
 
-        let world = self.predict_world.as_deref_mut().unwrap();
-        step_rockets(world, owner, command, previous_buttons, position, look, &self.set.p2(), &mut velocity);
+        let netahoy_world = self.netahoy_world.as_deref_mut().unwrap();
+        step_rockets(
+            netahoy_world,
+            owner,
+            command,
+            previous_buttons,
+            position,
+            look,
+            &self.set.p2(),
+            &mut velocity,
+        );
 
         let mut players = self.set.p1();
         let mut parts = players.get_mut(entity)?;
@@ -138,10 +147,10 @@ impl NetAhoyStepper<'_, '_> {
     }
 
     /// Client rewind hook: drop the local player's rockets fired after the acked
-    /// sequence so the replay can re-fire them. No-op where there's no rocket world.
+    /// sequence so the replay can re-fire them. No-op where there's no rocket resource.
     pub fn prune_rockets(&mut self, owner: PlayerId, ack: u32) {
-        if let Some(world) = self.predict_world.as_deref_mut() {
-            world.prune_after(owner, ack);
+        if let Some(netahoy_world) = self.netahoy_world.as_deref_mut() {
+            netahoy_world.prune_after(owner, ack);
         }
     }
 

@@ -7,7 +7,7 @@
 //! rewind+replay without storing anything in the rollback frame — on rewind we
 //! drop rockets fired after the ack and replay re-fires them.
 //!
-//! [`PredictWorld`] + [`step_rockets`] run on both peers (shared movement step);
+//! [`NetAhoyWorld`] + [`step_rockets`] run on both peers (shared movement step);
 //! the client also prunes on rewind, the server only steps forward. Same consts,
 //! same math, so prediction matches the server with no correction.
 
@@ -91,13 +91,13 @@ impl Rocket {
 /// rewind, the server only steps forward. On the server it holds every player's
 /// rockets, so access is scoped by owner.
 #[derive(Resource, Default)]
-pub struct PredictWorld {
+pub struct NetAhoyWorld {
     rockets: VecDeque<Rocket>,
     /// Blasts that went off this tick: `(firer, point)`, for the server splash.
     pub detonations: Vec<(PlayerId, Vec3)>,
 }
 
-impl PredictWorld {
+impl NetAhoyWorld {
     /// Rewind hook (client only): drop `owner`'s rockets fired after `ack`; the
     /// replay re-fires them. Survivors re-derive their position from elapsed ticks.
     pub fn prune_after(&mut self, owner: PlayerId, ack: u32) {
@@ -114,7 +114,7 @@ impl PredictWorld {
 /// Advance one player's rockets for one command, inside the movement step.
 /// Fire on the rising edge, apply self-knockback when due, retire spent ones.
 pub fn step_rockets(
-    world: &mut PredictWorld,
+    netahoy_world: &mut NetAhoyWorld,
     owner: PlayerId,
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,
@@ -126,16 +126,18 @@ pub fn step_rockets(
     let firing = command.buttons.contains(ROCKET_FIRE);
     let was_firing = previous_buttons.contains(ROCKET_FIRE);
     if firing && !was_firing {
-        if world.rockets.len() == MAX_ROCKETS {
-            world.rockets.pop_front();
+        if netahoy_world.rockets.len() == MAX_ROCKETS {
+            netahoy_world.rockets.pop_front();
         }
-        world.rockets.push_back(Rocket::fire(owner, command.sequence, position, look, spatial));
+        netahoy_world
+            .rockets
+            .push_back(Rocket::fire(owner, command.sequence, position, look, spatial));
     }
 
     // Detonate this owner's due rockets and retire spent ones. Collect blasts
-    // first so the retain closure doesn't also borrow `world`.
+    // first so the retain closure doesn't also borrow `netahoy_world`.
     let mut blasts = Vec::new();
-    world.rockets.retain(|rocket| {
+    netahoy_world.rockets.retain(|rocket| {
         if rocket.owner != owner {
             return true;
         }
@@ -147,7 +149,7 @@ pub fn step_rockets(
     });
     for point in blasts {
         *velocity += rocket_impulse(point, position);
-        world.detonations.push((owner, point));
+        netahoy_world.detonations.push((owner, point));
     }
 }
 
@@ -181,10 +183,10 @@ pub fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
 /// already got its self-knockback in [`step_rockets`]; this rides the snapshot
 /// stream down to clients (remote players aren't predicted).
 pub fn splash_other_players(
-    mut world: ResMut<PredictWorld>,
+    mut netahoy_world: ResMut<NetAhoyWorld>,
     mut players: Query<(&PlayerId, &Position, &mut LinearVelocity)>,
 ) {
-    let blasts = std::mem::take(&mut world.detonations);
+    let blasts = std::mem::take(&mut netahoy_world.detonations);
     for (firer, point) in blasts {
         for (player_id, position, mut velocity) in &mut players {
             if *player_id != firer {
@@ -195,8 +197,8 @@ pub fn splash_other_players(
 }
 
 /// Client-only: detonations are a server→splash channel, so drop them each tick.
-pub fn clear_predicted_detonations(world: Option<ResMut<PredictWorld>>) {
-    if let Some(mut world) = world {
-        world.detonations.clear();
+pub fn clear_predicted_detonations(netahoy_world: Option<ResMut<NetAhoyWorld>>) {
+    if let Some(mut netahoy_world) = netahoy_world {
+        netahoy_world.detonations.clear();
     }
 }

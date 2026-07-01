@@ -10,7 +10,7 @@ use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
-    world::{PredictWorld, clear_predicted_detonations},
+    world::{NetAhoyWorld, clear_predicted_detonations},
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
@@ -43,7 +43,7 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
-            .init_resource::<PredictWorld>()
+            .init_resource::<NetAhoyWorld>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
