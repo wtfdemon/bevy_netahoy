@@ -648,8 +648,6 @@ fn reconcile_local_prediction(
         .map(|ack_frame| (&ack_frame.controller_state, &ack_frame.accumulated_input));
 
     stepper.restore(predicted_entity, snapshot, local_state);
-    // Drop our rockets fired after the ack; the replay below re-fires them.
-    stepper.prune_rockets(PlayerId(local_id), snapshot.last_processed_sequence);
 
     let replayed = replay_commands.len();
     let mut previous_buttons = snapshot.last_processed_buttons;

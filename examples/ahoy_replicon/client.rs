@@ -391,14 +391,14 @@ fn spawn_client_prediction_kcc(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    local_players: Query<(Entity, &Transform, Option<&AhoySnapshot>), Added<ServerTruthGhost>>,
+    local_players: Query<(Entity, &PlayerId, &Transform, Option<&AhoySnapshot>), Added<ServerTruthGhost>>,
     predictions: Query<Entity, With<ClientPredictionKcc>>,
 ) {
     if predictions.iter().next().is_some() {
         return;
     }
 
-    for (server_entity, transform, authoritative_state) in &local_players {
+    for (server_entity, player_id, transform, authoritative_state) in &local_players {
         let position = authoritative_state
             .map(|state| state.position)
             .unwrap_or(transform.translation);
@@ -410,6 +410,7 @@ fn spawn_client_prediction_kcc(
             .spawn((
                 Name::new("client prediction kcc"),
                 ClientPredictionKcc { server_entity },
+                *player_id,
                 CharacterLook {
                     yaw: look.x,
                     pitch: look.y,

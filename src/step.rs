@@ -9,9 +9,8 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
-use crate::client::LocalPlayerId;
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
-use crate::world::{step_rockets, NetAhoyWorld};
+use crate::world::{step_world, NetAhoyWorld};
 
 /// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
 /// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
@@ -41,9 +40,7 @@ pub struct PmoveParts {
     position: &'static mut Position,
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
-    // Present on the server (replicated); absent on the client predicted entity,
-    // which falls back to LocalPlayerId for rocket ownership.
-    player_id: Option<&'static PlayerId>,
+    player_id: &'static PlayerId,
 }
 
 /// The movement context: all the Bevy bits a step needs, so callers stay short.
@@ -64,8 +61,6 @@ pub struct NetAhoyStepper<'w, 's> {
     // The rocket world both peers step. Optional so a peer that skips it just
     // runs movement without rockets (and the borrow stays clean).
     netahoy_world: Option<ResMut<'w, NetAhoyWorld>>,
-    // Client-only; lets the predicted entity (no PlayerId) own its rockets.
-    local_id: Option<Res<'w, LocalPlayerId>>,
 }
 
 impl NetAhoyStepper<'_, '_> {
@@ -94,42 +89,34 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
 
-        self.handle_rockets(entity, &command, previous_buttons)
+        self.handle_world(entity, &command, previous_buttons)
     }
 
-    /// Step this player's rockets after the KCC step, so client replay and the
-    /// server compose identically. `step_rockets` needs [`SpatialQuery`] (p2)
+    /// Step world-side movement effects after the KCC step, so client replay and the
+    /// server compose identically. `step_world` needs [`SpatialQuery`] (p2)
     /// alongside velocity (p1), which can't be borrowed at once, so we copy
     /// velocity out, run it, then write back.
-    fn handle_rockets(
+    fn handle_world(
         &mut self,
         entity: Entity,
         command: &AhoyUserCmd,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
-        let Some(_) = self.netahoy_world.as_ref() else {
+        let Some(netahoy_world) = self.netahoy_world.as_deref_mut() else {
             return Ok(());
         };
         let (position, look, mut velocity, owner) = {
             let mut players = self.set.p1();
             let parts = players.get_mut(entity)?;
-            // Server entities carry PlayerId; the client predicted entity doesn't,
-            // so fall back to the local player.
-            let owner = parts
-                .player_id
-                .copied()
-                .or_else(|| self.local_id.as_ref().and_then(|l| l.0).map(PlayerId))
-                .unwrap_or_default();
             (
                 parts.transform.translation,
                 Vec2::new(parts.look.yaw, parts.look.pitch),
                 parts.velocity.0,
-                owner,
+                *parts.player_id,
             )
         };
 
-        let netahoy_world = self.netahoy_world.as_deref_mut().unwrap();
-        step_rockets(
+        step_world(
             netahoy_world,
             owner,
             command,
@@ -144,14 +131,6 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.velocity.0 = velocity;
         Ok(())
-    }
-
-    /// Client rewind hook: drop the local player's rockets fired after the acked
-    /// sequence so the replay can re-fire them. No-op where there's no rocket resource.
-    pub fn prune_rockets(&mut self, owner: PlayerId, ack: u32) {
-        if let Some(netahoy_world) = self.netahoy_world.as_deref_mut() {
-            netahoy_world.prune_after(owner, ack);
-        }
     }
 
     /// Record the post-step state for `command` so it can be restored later.
@@ -177,26 +156,34 @@ impl NetAhoyStepper<'_, '_> {
         snapshot: &AhoySnapshot,
         local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
     ) {
-        let mut players = self.set.p1();
-        let Ok(mut parts) = players.get_mut(entity) else {
-            return;
+        let restored_owner = {
+            let mut players = self.set.p1();
+            let Ok(mut parts) = players.get_mut(entity) else {
+                return;
+            };
+            let owner = *parts.player_id;
+
+            parts.transform.translation = snapshot.position;
+            parts.position.0 = snapshot.position;
+            parts.velocity.0 = snapshot.velocity;
+            parts.look.yaw = snapshot.look.x;
+            parts.look.pitch = snapshot.look.y;
+
+            if let Some((stored_state, stored_input)) = local_state {
+                *parts.state = stored_state.clone();
+                *parts.input = stored_input.clone();
+            } else {
+                *parts.state = CharacterControllerState::default();
+                *parts.input = AccumulatedInput::default();
+            }
+
+            snapshot.state.apply_to_controller_state(&mut parts.state);
+            owner
         };
 
-        parts.transform.translation = snapshot.position;
-        parts.position.0 = snapshot.position;
-        parts.velocity.0 = snapshot.velocity;
-        parts.look.yaw = snapshot.look.x;
-        parts.look.pitch = snapshot.look.y;
-
-        if let Some((stored_state, stored_input)) = local_state {
-            *parts.state = stored_state.clone();
-            *parts.input = stored_input.clone();
-        } else {
-            *parts.state = CharacterControllerState::default();
-            *parts.input = AccumulatedInput::default();
+        if let Some(netahoy_world) = self.netahoy_world.as_deref_mut() {
+            netahoy_world.restore_world(restored_owner, snapshot.last_processed_sequence);
         }
-
-        snapshot.state.apply_to_controller_state(&mut parts.state);
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {

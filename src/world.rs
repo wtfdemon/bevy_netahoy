@@ -7,7 +7,7 @@
 //! rewind+replay without storing anything in the rollback frame — on rewind we
 //! drop rockets fired after the ack and replay re-fires them.
 //!
-//! [`NetAhoyWorld`] + [`step_rockets`] run on both peers (shared movement step);
+//! [`NetAhoyWorld`] + [`step_world`] run on both peers (shared movement step);
 //! the client also prunes on rewind, the server only steps forward. Same consts,
 //! same math, so prediction matches the server with no correction.
 
@@ -115,7 +115,7 @@ impl Rocket {
         let dir = (explosion - start).normalize_or_zero();
         // distance / speed = seconds, * HZ = ticks. Rounds to 0 point-blank, so a
         // shot into a wall detonates the same tick it's fired (the detonation pass
-        // in step_rockets runs right after the rocket is pushed).
+        // in step_world runs right after the rocket is pushed).
         let fuse_ticks = (hit_distance / SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
         Self { owner, fired_sequence, start, dir, hit_distance, fuse_ticks }
     }
@@ -172,9 +172,8 @@ impl Default for NetAhoyWorld {
 }
 
 impl NetAhoyWorld {
-    /// Rewind hook (client only): drop `owner`'s rockets fired after `ack`; the
-    /// replay re-fires them. Survivors re-derive their position from elapsed ticks.
-    pub fn prune_after(&mut self, owner: PlayerId, ack: u32) {
+    /// Rewind hook (client only): restore world-side prediction state to `ack`.
+    pub fn restore_world(&mut self, owner: PlayerId, ack: u32) {
         self.rockets
             .retain(|r| r.owner != owner || !sequence_is_newer(r.fired_sequence, ack));
     }
@@ -196,7 +195,7 @@ impl NetAhoyWorld {
 
 /// Advance one player's rockets for one command, inside the movement step.
 /// Fire on the rising edge, apply self-knockback when due, retire spent ones.
-pub fn step_rockets(
+pub fn step_world(
     netahoy_world: &mut NetAhoyWorld,
     owner: PlayerId,
     command: &AhoyUserCmd,
@@ -269,7 +268,7 @@ pub fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
 }
 
 /// Server-only: publish rocket events and push every *other* player caught in a
-/// blast this tick. The firer already got self-knockback in [`step_rockets`].
+/// blast this tick. The firer already got self-knockback in [`step_world`].
 fn process_rocket_events(
     mut commands: Commands,
     mut netahoy_world: ResMut<NetAhoyWorld>,
