@@ -14,7 +14,7 @@ use crate::{
     },
     step::NetAhoyStepper,
     protocol::*,
-    world::{splash_other_players, NetAhoyWorld},
+    world::NetAhoyWorldServerPlugin,
 };
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
@@ -33,18 +33,14 @@ pub struct ServerNetAhoyPlugin;
 
 impl Plugin for ServerNetAhoyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ServerTick>()
+        app.add_plugins(NetAhoyWorldServerPlugin)
+            .init_resource::<ServerTick>()
             .init_resource::<LagCompensationHistory>()
-            .init_resource::<NetAhoyWorld>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
             .add_systems(
                 FixedPreUpdate,
                 apply_player_commands.in_set(ServerNetAhoySystems::ApplyCommands),
-            )
-            .add_systems(
-                FixedPreUpdate,
-                splash_other_players.after(ServerNetAhoySystems::ApplyCommands),
             )
             .add_systems(
                 FixedLast,

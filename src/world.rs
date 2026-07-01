@@ -16,9 +16,11 @@ use std::collections::VecDeque;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
+use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{sequence_cmp, sequence_is_newer, AhoyButtons, AhoyUserCmd, PlayerId, FIXED_TIMESTEP_HZ};
+use crate::server::ServerNetAhoySystems;
 
 /// Library-owned collision layers, so the colliders the game spawns and the
 /// rocket raycast here agree on one numbering.
@@ -37,6 +39,53 @@ const IMPULSE_SPEED: f32 = 42.0;
 const MAX_DISTANCE: f32 = SPEED * LIFETIME_SECONDS;
 /// Backstop against an abusive fire stream; rockets normally retire on detonation.
 const MAX_ROCKETS: usize = 64;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RocketId {
+    pub owner: PlayerId,
+    pub fired_sequence: u32,
+}
+
+/// Server event: a rocket was fired. Remote clients can use this for visuals.
+#[derive(Event, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RocketFired {
+    pub id: RocketId,
+    pub start: Vec3,
+    pub dir: Vec3,
+}
+
+/// Server event: a rocket detonated. The same value is used by server splash.
+#[derive(Event, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RocketHit {
+    pub id: RocketId,
+    pub point: Vec3,
+}
+
+pub struct NetAhoyWorldServerPlugin;
+
+impl Plugin for NetAhoyWorldServerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_server_event::<RocketFired>(Channel::Ordered)
+            .add_server_event::<RocketHit>(Channel::Ordered)
+            .init_resource::<NetAhoyWorld>()
+            .add_systems(
+                FixedPreUpdate,
+                process_rocket_events.after(ServerNetAhoySystems::ApplyCommands),
+            );
+    }
+}
+
+pub struct NetAhoyWorldClientPlugin;
+
+impl Plugin for NetAhoyWorldClientPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_server_event::<RocketFired>(Channel::Ordered)
+            .add_server_event::<RocketHit>(Channel::Ordered)
+            .init_resource::<NetAhoyWorld>()
+            .add_observer(prune_predicted_rocket_on_hit)
+            .add_systems(FixedLast, clear_predicted_rocket_events);
+    }
+}
 
 /// One rocket. Immutable after firing: the raycast bakes `start`/`dir`/
 /// `hit_distance`/`fuse_ticks`, everything else derives from elapsed ticks.
@@ -75,6 +124,21 @@ impl Rocket {
         self.fired_sequence.wrapping_add(self.fuse_ticks)
     }
 
+    pub fn id(&self) -> RocketId {
+        RocketId {
+            owner: self.owner,
+            fired_sequence: self.fired_sequence,
+        }
+    }
+
+    pub fn fired_event(&self) -> RocketFired {
+        RocketFired {
+            id: self.id(),
+            start: self.start,
+            dir: self.dir,
+        }
+    }
+
     pub fn detonation_point(&self) -> Vec3 {
         self.start + self.dir * self.hit_distance
     }
@@ -90,11 +154,21 @@ impl Rocket {
 /// Rockets in flight, in one place. Lives on both peers; the client prunes it on
 /// rewind, the server only steps forward. On the server it holds every player's
 /// rockets, so access is scoped by owner.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct NetAhoyWorld {
     rockets: VecDeque<Rocket>,
-    /// Blasts that went off this tick: `(firer, point)`, for the server splash.
-    pub detonations: Vec<(PlayerId, Vec3)>,
+    rockets_fired: Vec<RocketFired>,
+    rockets_hit: Vec<RocketHit>,
+}
+
+impl Default for NetAhoyWorld {
+    fn default() -> Self {
+        Self {
+            rockets: VecDeque::with_capacity(MAX_ROCKETS),
+            rockets_fired: Vec::with_capacity(MAX_ROCKETS),
+            rockets_hit: Vec::with_capacity(MAX_ROCKETS),
+        }
+    }
 }
 
 impl NetAhoyWorld {
@@ -105,9 +179,18 @@ impl NetAhoyWorld {
             .retain(|r| r.owner != owner || !sequence_is_newer(r.fired_sequence, ack));
     }
 
+    pub fn prune_rocket(&mut self, id: RocketId) {
+        self.rockets.retain(|rocket| rocket.id() != id);
+    }
+
     /// Rockets and their current position at `sequence`, for rendering.
     pub fn iter_at(&self, sequence: u32) -> impl Iterator<Item = (&Rocket, Vec3)> {
         self.rockets.iter().map(move |r| (r, r.position_at(sequence)))
+    }
+
+    fn clear_transients(&mut self) {
+        self.rockets_fired.clear();
+        self.rockets_hit.clear();
     }
 }
 
@@ -129,9 +212,9 @@ pub fn step_rockets(
         if netahoy_world.rockets.len() == MAX_ROCKETS {
             netahoy_world.rockets.pop_front();
         }
-        netahoy_world
-            .rockets
-            .push_back(Rocket::fire(owner, command.sequence, position, look, spatial));
+        let rocket = Rocket::fire(owner, command.sequence, position, look, spatial);
+        netahoy_world.rockets_fired.push(rocket.fired_event());
+        netahoy_world.rockets.push_back(rocket);
     }
 
     // Detonate this owner's due rockets and retire spent ones. Collect blasts
@@ -142,14 +225,20 @@ pub fn step_rockets(
             return true;
         }
         match sequence_cmp(rocket.detonation_sequence(), command.sequence) {
-            Ordering::Greater => true,                                    // in flight
-            Ordering::Equal => { blasts.push(rocket.detonation_point()); false } // boom
-            Ordering::Less => false,                                      // spent
+            Ordering::Greater => true, // in flight
+            Ordering::Equal => {
+                blasts.push(RocketHit {
+                    id: rocket.id(),
+                    point: rocket.detonation_point(),
+                });
+                false
+            } // boom
+            Ordering::Less => false,   // spent
         }
     });
-    for point in blasts {
-        *velocity += rocket_impulse(point, position);
-        netahoy_world.detonations.push((owner, point));
+    for hit in blasts {
+        *velocity += rocket_impulse(hit.point, position);
+        netahoy_world.rockets_hit.push(hit);
     }
 }
 
@@ -179,26 +268,41 @@ pub fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
     direction * (IMPULSE_SPEED * (1.0 - distance / SPLASH_RADIUS))
 }
 
-/// Server-only: push every *other* player caught in a blast this tick. The firer
-/// already got its self-knockback in [`step_rockets`]; this rides the snapshot
-/// stream down to clients (remote players aren't predicted).
-pub fn splash_other_players(
+/// Server-only: publish rocket events and push every *other* player caught in a
+/// blast this tick. The firer already got self-knockback in [`step_rockets`].
+fn process_rocket_events(
+    mut commands: Commands,
     mut netahoy_world: ResMut<NetAhoyWorld>,
     mut players: Query<(&PlayerId, &Position, &mut LinearVelocity)>,
 ) {
-    let blasts = std::mem::take(&mut netahoy_world.detonations);
-    for (firer, point) in blasts {
+    for message in netahoy_world.rockets_fired.drain(..) {
+        commands.server_trigger(ToClients {
+            mode: SendMode::Broadcast,
+            message,
+        });
+    }
+
+    for hit in netahoy_world.rockets_hit.drain(..) {
+        commands.server_trigger(ToClients {
+            mode: SendMode::Broadcast,
+            message: hit,
+        });
+
         for (player_id, position, mut velocity) in &mut players {
-            if *player_id != firer {
-                velocity.0 += rocket_impulse(point, position.0);
+            if *player_id != hit.id.owner {
+                velocity.0 += rocket_impulse(hit.point, position.0);
             }
         }
     }
 }
 
-/// Client-only: detonations are a server→splash channel, so drop them each tick.
-pub fn clear_predicted_detonations(netahoy_world: Option<ResMut<NetAhoyWorld>>) {
+fn prune_predicted_rocket_on_hit(hit: On<RocketHit>, mut netahoy_world: ResMut<NetAhoyWorld>) {
+    netahoy_world.prune_rocket(hit.id);
+}
+
+/// Client-only: transient rocket queues are server-owned, so drop predicted ones.
+pub fn clear_predicted_rocket_events(netahoy_world: Option<ResMut<NetAhoyWorld>>) {
     if let Some(mut netahoy_world) = netahoy_world {
-        netahoy_world.detonations.clear();
+        netahoy_world.clear_transients();
     }
 }

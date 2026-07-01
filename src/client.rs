@@ -10,7 +10,7 @@ use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
-    world::{NetAhoyWorld, clear_predicted_detonations},
+    world::NetAhoyWorldClientPlugin,
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
@@ -37,13 +37,13 @@ pub struct ClientNetAhoyPlugin;
 
 impl Plugin for ClientNetAhoyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<LocalPlayerId>()
+        app.add_plugins(NetAhoyWorldClientPlugin)
+            .init_resource::<LocalPlayerId>()
             .init_resource::<ClientInput>()
             .init_resource::<ClientInputState>()
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
-            .init_resource::<NetAhoyWorld>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -62,7 +62,7 @@ impl Plugin for ClientNetAhoyPlugin {
                     .run_if(in_state(ClientState::Connected))
                     .in_set(ClientNetAhoySystems::Predict),
             )
-            .add_systems(FixedLast, (record_prediction_state, clear_predicted_detonations))
+            .add_systems(FixedLast, record_prediction_state)
             .add_systems(
                 Update,
                 (

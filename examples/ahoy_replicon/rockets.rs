@@ -9,13 +9,16 @@ use bevy_ahoy::CharacterLook;
 use bevy_netahoy::*;
 
 const ROCKET_DEBUG_SECONDS: f32 = 0.85;
+const REMOTE_ROCKET_STREAK_METERS: f32 = 2.0;
 
 pub fn add_client_rockets(app: &mut App) {
-    app.add_systems(
-        FixedPreUpdate,
-        spawn_rocket_visual.after(ClientNetAhoySystems::Predict),
-    )
-    .add_systems(Update, update_rocket_markers);
+    app.add_observer(receive_rocket_fired)
+        .add_observer(receive_rocket_hit)
+        .add_systems(
+            FixedPreUpdate,
+            spawn_rocket_visual.after(ClientNetAhoySystems::Predict),
+        )
+        .add_systems(Update, update_rocket_markers);
 }
 
 #[derive(Component)]
@@ -48,16 +51,92 @@ fn spawn_rocket_visual(
     // Trace the same rocket the predictor will fire, so the marker lands where the
     // real blast goes off. It shows immediately even though the blast has travel
     // time; it only marks the landing spot, which is fine for now.
-    let rocket = Rocket::fire(PlayerId::default(), 0, transform.translation, look, &spatial);
+    let rocket = Rocket::fire(
+        PlayerId::default(),
+        0,
+        transform.translation,
+        look,
+        &spatial,
+    );
     let origin = rocket.start;
     let explosion = rocket.detonation_point();
 
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.1, 0.9, 1.0, 0.7),
+    let material = rocket_material(&mut materials, Color::srgba(0.1, 0.9, 1.0, 0.7));
+
+    spawn_rocket_trail(
+        &mut commands,
+        &mut meshes,
+        material.clone(),
+        origin,
+        explosion,
+        "rocket trail",
+    );
+    spawn_explosion_marker(
+        &mut commands,
+        &mut meshes,
+        material,
+        explosion,
+        "rocket explosion",
+    );
+}
+
+fn receive_rocket_fired(
+    fired: On<RocketFired>,
+    local: Res<LocalPlayerId>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if local.0 == Some(fired.id.owner.0) {
+        return;
+    }
+
+    let material = rocket_material(&mut materials, Color::srgba(1.0, 0.45, 0.1, 0.65));
+    spawn_rocket_trail(
+        &mut commands,
+        &mut meshes,
+        material,
+        fired.start,
+        fired.start + fired.dir * REMOTE_ROCKET_STREAK_METERS,
+        "remote rocket trail",
+    );
+}
+
+fn receive_rocket_hit(
+    hit: On<RocketHit>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let material = rocket_material(&mut materials, Color::srgba(1.0, 0.15, 0.08, 0.75));
+    spawn_explosion_marker(
+        &mut commands,
+        &mut meshes,
+        material,
+        hit.point,
+        "rocket hit",
+    );
+}
+
+fn rocket_material(
+    materials: &mut Assets<StandardMaterial>,
+    color: Color,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: color,
         alpha_mode: AlphaMode::Blend,
         ..default()
-    });
+    })
+}
 
+fn spawn_rocket_trail(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: Handle<StandardMaterial>,
+    origin: Vec3,
+    explosion: Vec3,
+    name: &'static str,
+) {
     let segment = explosion - origin;
     let length = segment.length();
     if length > 0.001 {
@@ -70,18 +149,26 @@ fn spawn_rocket_visual(
         let mut ray_transform = Transform::from_translation(origin + segment * 0.5);
         ray_transform.look_to(direction, up);
         commands.spawn((
-            Name::new("rocket trail"),
+            Name::new(name),
             RocketMarker {
                 timer: Timer::from_seconds(ROCKET_DEBUG_SECONDS, TimerMode::Once),
             },
             Mesh3d(meshes.add(Cuboid::new(0.045, 0.045, length))),
-            MeshMaterial3d(material.clone()),
+            MeshMaterial3d(material),
             ray_transform,
         ));
     }
+}
 
+fn spawn_explosion_marker(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    material: Handle<StandardMaterial>,
+    explosion: Vec3,
+    name: &'static str,
+) {
     commands.spawn((
-        Name::new("rocket explosion"),
+        Name::new(name),
         RocketMarker {
             timer: Timer::from_seconds(ROCKET_DEBUG_SECONDS, TimerMode::Once),
         },
