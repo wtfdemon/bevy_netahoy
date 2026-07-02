@@ -20,6 +20,7 @@ use bevy_replicon::prelude::*;
 mod hitscan;
 mod rockets;
 mod shared;
+mod vehicle;
 use hitscan::ExampleHitscanClientSystems;
 use shared::*;
 
@@ -116,6 +117,7 @@ impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         hitscan::add_client_hitscan(app);
         rockets::add_client_rockets(app);
+        vehicle::add_client_vehicles(app);
 
         app.add_plugins((WebSocketClientPlugin, AeronetRepliconClientPlugin))
             .add_observer(use_replicon_for_session)
@@ -596,13 +598,20 @@ fn gather_client_input(
 
 fn update_camera_from_local_presentation(
     look: Res<ClientLook>,
+    driven: Query<&Transform, (With<vehicle::LocalVehicleSim>, Without<Camera3d>)>,
     presentations: Query<&Transform, (With<LocalPresentationPlayer>, Without<Camera3d>)>,
     server_players: Query<&AhoySnapshot, With<ServerTruthGhost>>,
     mut camera: Single<&mut Transform, CameraRigFilter>,
 ) {
-    let target = presentations
+    // While driving, orbit the locally simulated buggy (there is no capsule).
+    let target = driven
         .single()
-        .map(|transform| transform.translation + Vec3::Y * 0.6)
+        .map(|transform| transform.translation + Vec3::Y * 0.9)
+        .or_else(|_| {
+            presentations
+                .single()
+                .map(|transform| transform.translation + Vec3::Y * 0.6)
+        })
         .or_else(|_| {
             server_players
                 .single()
@@ -622,10 +631,13 @@ fn update_camera_from_local_presentation(
 
 fn update_speed_text(
     mut text: Single<&mut Text, With<SpeedText>>,
+    sim_velocity: Option<Single<&LinearVelocity, With<vehicle::LocalVehicleSim>>>,
     predicted_velocity: Option<Single<&LinearVelocity, With<ClientPredictionKcc>>>,
     server_velocity: Option<Single<&LinearVelocity, With<ServerTruthGhost>>>,
 ) {
-    if let Some(velocity) = predicted_velocity {
+    if let Some(velocity) = sim_velocity {
+        text.0 = format!("driving {:.3}", velocity.xz().length());
+    } else if let Some(velocity) = predicted_velocity {
         text.0 = format!("predicted {:.3}", velocity.xz().length());
     } else if let Some(velocity) = server_velocity {
         text.0 = format!("{:.3}", velocity.xz().length());

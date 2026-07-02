@@ -36,6 +36,11 @@ const SPEED: f32 = 42.0;
 const LIFETIME_SECONDS: f32 = 1.35;
 const SPLASH_RADIUS: f32 = 4.0;
 const IMPULSE_SPEED: f32 = 42.0;
+/// A dynamic rigid body of this mass gets the same launch as a player; heavier
+/// bodies move proportionally less (`rocket_impulse` is a player velocity, so we
+/// treat it as momentum for a body of this mass and divide by the real mass).
+/// Public so game code applying blasts to its own bodies matches the server.
+pub const BLAST_REFERENCE_MASS: f32 = 40.0;
 const MAX_DISTANCE: f32 = SPEED * LIFETIME_SECONDS;
 /// Backstop against an abusive fire stream; rockets normally retire on detonation.
 const MAX_ROCKETS: usize = 64;
@@ -272,7 +277,15 @@ pub fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
 fn process_rocket_events(
     mut commands: Commands,
     mut netahoy_world: ResMut<NetAhoyWorld>,
+    // Players are selected by PlayerId, NOT by the absence of RigidBody: the
+    // KCC is a kinematic rigid body (bevy_ahoy's CharacterController requires
+    // RigidBody::Kinematic), so a RigidBody filter would silently reroute
+    // players into the mass-scaled loop below.
     mut players: Query<(&PlayerId, &Position, &mut LinearVelocity)>,
+    mut bodies: Query<
+        (&RigidBody, &Position, &mut LinearVelocity, &ComputedMass),
+        Without<PlayerId>,
+    >,
 ) {
     for message in netahoy_world.rockets_fired.drain(..) {
         commands.server_trigger(ToClients {
@@ -291,6 +304,19 @@ fn process_rocket_events(
             if *player_id != hit.id.owner {
                 velocity.0 += rocket_impulse(hit.point, position.0);
             }
+        }
+
+        // Dynamic rigid bodies (e.g. a vehicle) get the same blast as a proper,
+        // mass-scaled impulse. Body type is checked explicitly — ComputedMass
+        // still holds collider-derived values on kinematic/static bodies, so
+        // an inverse-mass guard alone doesn't exclude them.
+        for (body, position, mut velocity, mass) in &mut bodies {
+            let inverse_mass = mass.inverse();
+            if !matches!(body, RigidBody::Dynamic) || inverse_mass <= 0.0 {
+                continue;
+            }
+            velocity.0 +=
+                rocket_impulse(hit.point, position.0) * (BLAST_REFERENCE_MASS * inverse_mass);
         }
     }
 }

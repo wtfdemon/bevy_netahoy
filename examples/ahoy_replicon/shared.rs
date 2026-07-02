@@ -4,14 +4,17 @@
 
 use avian3d::prelude::*;
 use bevy::{prelude::*, state::app::StatesPlugin};
-use bevy_ahoy::prelude::*;
+use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_netahoy::{
-    apply_debug_time_scale, DebugTimeScale, NetAhoyProtocolPlugin, FIXED_TIMESTEP_HZ,
+    apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetworkedPlayer,
+    PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer, FIXED_TIMESTEP_HZ,
     PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
-use ahoy_replicon::{HitScanAck, HitScanShot};
+use ahoy_replicon::{
+    BoardVehicle, Driver, HitScanAck, HitScanShot, Vehicle, VehicleRocketFired, VehicleState,
+};
 
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
 pub const FLYING_TARGET_PLAYER_ID: u64 = 9_001;
@@ -30,6 +33,15 @@ impl Plugin for ExampleSharedPlugin {
             // channel barely matters here. Over UDP, prefer a fire button in UserCmd.
             .add_client_event::<HitScanShot>(Channel::Unordered)
             .add_server_event::<HitScanAck>(Channel::Unordered)
+            // Vehicles: markers replicate down; boarding and the owner's
+            // simulated pose stream up. Pose loss is fine (next tick supersedes).
+            .replicate::<Vehicle>()
+            .replicate::<Driver>()
+            .add_client_event::<BoardVehicle>(Channel::Ordered)
+            .add_client_event::<VehicleState>(Channel::Unreliable)
+            // Fired by the driver, relayed by the server to everyone.
+            .add_client_event::<VehicleRocketFired>(Channel::Ordered)
+            .add_server_event::<VehicleRocketFired>(Channel::Ordered)
             .add_systems(Startup, apply_debug_time_scale);
     }
 }
@@ -169,6 +181,33 @@ pub fn player_controller() -> CharacterController {
 
 pub fn player_collision_layers() -> CollisionLayers {
     CollisionLayers::new(PLAYER_COLLISION_LAYER, LayerMask::ALL)
+}
+
+/// Spawn the server-side player entity for `client`. Used on join and when a
+/// driver hops out of a vehicle (with the vehicle's velocity, for momentum).
+pub fn spawn_player(
+    commands: &mut Commands,
+    client: Entity,
+    player_id: u64,
+    position: Vec3,
+    velocity: Vec3,
+) {
+    commands.spawn((
+        Name::new(format!("player {player_id}")),
+        Replicated,
+        NetworkedPlayer,
+        PlayerId(player_id),
+        AhoySnapshot::default(),
+        PlayerOwner(client),
+        ServerCommandBuffer::default(),
+        QueuedUserCmds::default(),
+        CharacterLook::default(),
+        player_controller(),
+        Collider::cylinder(0.45, 1.5),
+        player_collision_layers(),
+        LinearVelocity(velocity),
+        Transform::from_translation(position),
+    ));
 }
 
 pub fn player_spawn_point(player_id: u64) -> Vec3 {

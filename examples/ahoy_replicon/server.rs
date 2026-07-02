@@ -14,6 +14,7 @@ use bevy_replicon::prelude::*;
 mod hitscan;
 mod rockets;
 mod shared;
+mod vehicle;
 use shared::*;
 
 fn main() -> AppExit {
@@ -46,6 +47,7 @@ struct ServerPlugin;
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         hitscan::add_server_hitscan(app);
+        vehicle::add_server_vehicles(app);
 
         app.add_plugins((WebSocketServerPlugin, AeronetRepliconServerPlugin))
             .add_observer(join_player)
@@ -70,6 +72,7 @@ fn setup_server(mut commands: Commands) {
         ));
     spawn_world_colliders(&mut commands);
     spawn_flying_target(&mut commands);
+    vehicle::spawn_buggy(&mut commands, Vec3::new(-8.0, 1.5, 10.0));
 
     info!("websocket server listening on {DEFAULT_SERVER_URL}");
 }
@@ -101,21 +104,13 @@ fn join_player(
 
     info!("client {client} joined as player {player_id}");
 
-    commands.spawn((
-        Name::new(format!("player {player_id}")),
-        Replicated,
-        NetworkedPlayer,
-        PlayerId(player_id),
-        AhoySnapshot::default(),
-        PlayerOwner(client),
-        ServerCommandBuffer::default(),
-        QueuedUserCmds::default(),
-        CharacterLook::default(),
-        player_controller(),
-        Collider::cylinder(0.45, 1.5),
-        player_collision_layers(),
-        Transform::from_translation(player_spawn_point(player_id)),
-    ));
+    spawn_player(
+        &mut commands,
+        client,
+        player_id,
+        player_spawn_point(player_id),
+        Vec3::ZERO,
+    );
 }
 
 fn spawn_flying_target(commands: &mut Commands) {
