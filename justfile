@@ -5,8 +5,15 @@ client_name := "ahoy_client"
 port := "5000"
 web_port := "8080"
 
-# Build the websocket server/client examples for Windows from WSL2 and run local player windows.
+# Build the websocket server/client examples for Windows from WSL2 and run local player windows with poor networking.
 win-dev players="2" slowmo="1.0" show_ghosts="false":
+    @just _win-local "{{players}}" "{{slowmo}}" "{{show_ghosts}}" "true"
+
+# Build the websocket server/client examples for Windows from WSL2 and run local player windows without simulated ping/loss.
+win-perfect players="2" slowmo="1.0" show_ghosts="false":
+    @just _win-local "{{players}}" "{{slowmo}}" "{{show_ghosts}}" "false"
+
+_win-local players slowmo show_ghosts poor_net:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -20,8 +27,10 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     PLAYERS="{{players}}"
     SLOWMO="{{slowmo}}"
     SHOW_GHOSTS="{{show_ghosts}}"
-    SERVER_ARGS=(--poor-net)
-    CLIENT_ARGS=(--poor-net)
+    POOR_NET="{{poor_net}}"
+    SERVER_ARGS=()
+    CLIENT_ARGS=()
+    NET_LABEL="normal network conditions"
     PIDS=()
 
     command -v cmd.exe >/dev/null 2>&1 || { echo "cmd.exe not found; run this from WSL2."; exit 1; }
@@ -29,6 +38,11 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     [[ "${SLOWMO}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "slowmo must be a positive number"; exit 2; }
     [[ "${SHOW_GHOSTS}" == "true" || "${SHOW_GHOSTS}" == "false" ]] || { echo "show_ghosts must be true or false"; exit 2; }
 
+    if [[ "${POOR_NET}" == "true" ]]; then
+        SERVER_ARGS+=(--poor-net)
+        CLIENT_ARGS+=(--poor-net)
+        NET_LABEL="poor network conditions"
+    fi
     if [[ "${SLOWMO}" != "1" && "${SLOWMO}" != "1.0" ]]; then
         SERVER_ARGS+=(--slowmo "${SLOWMO}")
         CLIENT_ARGS+=(--slowmo "${SLOWMO}")
@@ -61,7 +75,7 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     }
     trap cleanup EXIT INT TERM
 
-    echo "Starting server with poor network conditions and time scale ${SLOWMO}x..."
+    echo "Starting server with ${NET_LABEL} and time scale ${SLOWMO}x..."
     (cd "${STAGE_DIR}" && "./${SERVER_NAME}.exe" "${SERVER_ARGS[@]}") &
     PIDS+=("$!")
 
@@ -75,7 +89,7 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     sleep 1
 
     for id in $(seq 1 "${PLAYERS}"); do
-        echo "Starting client ${id} with poor network conditions, time scale ${SLOWMO}x, show ghosts ${SHOW_GHOSTS}..."
+        echo "Starting client ${id} with ${NET_LABEL}, time scale ${SLOWMO}x, show ghosts ${SHOW_GHOSTS}..."
         (cd "${STAGE_DIR}" && "./${CLIENT_NAME}.exe" "${CLIENT_ARGS[@]}") &
         PIDS+=("$!")
         sleep 1

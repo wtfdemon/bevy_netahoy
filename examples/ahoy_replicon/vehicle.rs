@@ -898,6 +898,10 @@ fn manage_local_sim(
             LocalVehicleSim { server_entity: vehicle },
             VehicleController::new_buggy(),
             RigidBody::Dynamic,
+            // The sim ticks at 20 Hz; render its Transform interpolated
+            // between physics poses (same thing the KCC gets via bevy_ahoy's
+            // required TranslationInterpolation).
+            TransformInterpolation,
             SleepingDisabled,
             chassis_collider(),
             vehicle_collision_layers(),
