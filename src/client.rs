@@ -211,8 +211,12 @@ impl PredictionHistory {
     }
 
     pub fn retain_after(&mut self, sequence: u32) {
-        self.frames
-            .retain(|frame| sequence_is_newer(frame.command.sequence, sequence));
+        // Keep the frame AT `sequence`: a later snapshot can repeat the same
+        // ack (dropped inputs, external impulses) and must re-compare against it.
+        self.frames.retain(|frame| {
+            frame.command.sequence == sequence
+                || sequence_is_newer(frame.command.sequence, sequence)
+        });
     }
 
     pub fn clear(&mut self) {
@@ -600,15 +604,6 @@ fn reconcile_local_prediction(
 
     if snapshot.last_processed_sequence == 0 {
         correction.mode = CorrectionMode::Waiting;
-        correction.last_server_tick = snapshot.server_tick;
-        correction.last_error = 0.0;
-        correction.replayed_commands = 0;
-        return;
-    }
-
-    if snapshot.last_processed_sequence == correction.last_ack_sequence {
-        history.retain_after(snapshot.last_processed_sequence);
-        correction.mode = CorrectionMode::Ignored;
         correction.last_server_tick = snapshot.server_tick;
         correction.last_error = 0.0;
         correction.replayed_commands = 0;
