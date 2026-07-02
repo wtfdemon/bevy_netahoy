@@ -25,6 +25,7 @@
 use std::f32::consts::FRAC_PI_2;
 
 use aeronet::io::connection::Disconnected;
+use avian3d::physics_transform::ApplyPosToTransform;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_netahoy::{
@@ -533,6 +534,8 @@ pub fn spawn_buggy(commands: &mut Commands, translation: Vec3) {
         vehicle_collision_layers(),
         Mass(CHASSIS_MASS),
         Position::new(translation),
+        // Explicit so the initial replication carries a rotation.
+        Rotation::default(),
         Transform::from_translation(translation),
     ));
 }
@@ -627,7 +630,6 @@ fn apply_vehicle_state(
             &mut Rotation,
             &mut LinearVelocity,
             &mut AngularVelocity,
-            &mut Transform,
         ),
         With<Vehicle>,
     >,
@@ -636,8 +638,7 @@ fn apply_vehicle_state(
         return;
     };
 
-    for (driven, mut position, mut rotation, mut linvel, mut angvel, mut transform) in &mut vehicles
-    {
+    for (driven, mut position, mut rotation, mut linvel, mut angvel) in &mut vehicles {
         if driven.client != client {
             continue;
         }
@@ -645,8 +646,6 @@ fn apply_vehicle_state(
         rotation.0 = state.rotation;
         linvel.0 = state.linear_velocity;
         angvel.0 = state.angular_velocity;
-        transform.translation = state.position;
-        transform.rotation = state.rotation;
     }
 }
 
@@ -792,10 +791,16 @@ struct VehicleRocketBoom {
 pub fn add_client_vehicles(app: &mut App) {
     app.add_observer(blast_local_sim_on_rocket_hit)
         .add_observer(receive_vehicle_rockets)
+        // Right after replication applies, before the fixed loop can run:
+        // the collider and seeded Transform must exist before avian's first
+        // look at the entity, or its transform sync stomps the fresh Position.
+        .add_systems(
+            PreUpdate,
+            attach_vehicle_bodies.after(ClientSystems::Receive),
+        )
         .add_systems(
             Update,
             (
-                attach_vehicle_bodies,
                 send_board_requests,
                 manage_local_sim,
                 fire_vehicle_rockets,
@@ -814,12 +819,21 @@ fn attach_vehicle_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    added: Query<(Entity, &Transform), Added<Vehicle>>,
+    added: Query<(Entity, &Position, &Rotation), Added<Vehicle>>,
 ) {
-    for (server_entity, transform) in &added {
-        commands
-            .entity(server_entity)
-            .insert((chassis_collider(), vehicle_collision_layers()));
+    for (server_entity, position, rotation) in &added {
+        commands.entity(server_entity).insert((
+            chassis_collider(),
+            vehicle_collision_layers(),
+            // No RigidBody here, so avian won't sync Position → Transform on
+            // its own — and its *reverse* sync then stomps the replicated
+            // Position back to the stale (identity) Transform whenever a
+            // replication gap leaves Position untouched for a physics tick.
+            // This marker opts into the forward sync, and the seeded Transform
+            // keeps them equal even on the very first tick.
+            ApplyPosToTransform,
+            Transform::from_translation(position.0).with_rotation(rotation.0),
+        ));
 
         let body = materials.add(StandardMaterial {
             base_color: Color::srgb(0.9, 0.55, 0.15),
@@ -843,7 +857,7 @@ fn attach_vehicle_bodies(
                     CHASSIS_HALF.z * 2.0,
                 ))),
                 MeshMaterial3d(body),
-                *transform,
+                Transform::from_translation(position.0).with_rotation(rotation.0),
                 Visibility::Visible,
             ))
             .with_children(|parent| {
@@ -873,7 +887,10 @@ fn send_board_requests(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) 
 fn manage_local_sim(
     mut commands: Commands,
     local: Res<LocalPlayerId>,
-    vehicles: Query<(Entity, &Transform, Option<&LinearVelocity>, Option<&Driver>), With<Vehicle>>,
+    vehicles: Query<
+        (Entity, &Position, &Rotation, Option<&LinearVelocity>, Option<&Driver>),
+        With<Vehicle>,
+    >,
     sims: Query<(Entity, &LocalVehicleSim)>,
 ) {
     let driven = vehicles
@@ -889,7 +906,7 @@ fn manage_local_sim(
         }
     }
 
-    if let Some((vehicle, transform, velocity, _)) = driven
+    if let Some((vehicle, position, rotation, velocity, _)) = driven
         && !sims.iter().any(|(_, sim)| sim.server_entity == vehicle)
     {
         commands.entity(vehicle).insert(ColliderDisabled);
@@ -906,11 +923,11 @@ fn manage_local_sim(
             chassis_collider(),
             vehicle_collision_layers(),
             Mass(CHASSIS_MASS),
-            Position::new(transform.translation),
-            Rotation(transform.rotation),
+            *position,
+            *rotation,
             LinearVelocity(velocity.map(|velocity| velocity.0).unwrap_or_default()),
             AngularVelocity::default(),
-            *transform,
+            Transform::from_translation(position.0).with_rotation(rotation.0),
         ));
     }
 }
@@ -1011,7 +1028,7 @@ fn update_vehicle_visuals(
     time: Res<Time>,
     mut visuals: Query<(&VehicleVisual, &mut Transform)>,
     sims: Query<(&LocalVehicleSim, &Transform), Without<VehicleVisual>>,
-    vehicles: Query<&Transform, (With<Vehicle>, Without<VehicleVisual>, Without<LocalVehicleSim>)>,
+    vehicles: Query<(&Position, &Rotation), With<Vehicle>>,
 ) {
     let alpha = 1.0 - (-VISUAL_FOLLOW_RATE * time.delta_secs()).exp();
     for (visual, mut transform) in &mut visuals {
@@ -1020,9 +1037,9 @@ fn update_vehicle_visuals(
             .find(|(sim, _)| sim.server_entity == visual.server_entity)
         {
             *transform = *sim_transform;
-        } else if let Ok(target) = vehicles.get(visual.server_entity) {
-            transform.translation = transform.translation.lerp(target.translation, alpha);
-            transform.rotation = transform.rotation.slerp(target.rotation, alpha);
+        } else if let Ok((position, rotation)) = vehicles.get(visual.server_entity) {
+            transform.translation = transform.translation.lerp(position.0, alpha);
+            transform.rotation = transform.rotation.slerp(rotation.0, alpha);
         }
     }
 }

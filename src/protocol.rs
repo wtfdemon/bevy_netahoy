@@ -28,7 +28,12 @@ impl Plugin for NetAhoyProtocolPlugin {
         app.replicate::<NetworkedPlayer>()
             .replicate::<PlayerId>()
             .replicate::<AhoySnapshot>()
-            .replicate_filtered::<Transform, Without<AhoySnapshot>>()
+            // Non-player movers (vehicles, props) replicate the authoritative
+            // physics pose, not Transform: Transform is presentation state and
+            // stays client-owned (free for smoothing), and scale never rides
+            // along. Players are excluded — their pose flows via AhoySnapshot.
+            .replicate_filtered::<Position, Without<AhoySnapshot>>()
+            .replicate_filtered::<Rotation, Without<AhoySnapshot>>()
             .replicate_filtered::<LinearVelocity, Without<AhoySnapshot>>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
             .add_server_event::<JoinAccepted>(Channel::Ordered)
