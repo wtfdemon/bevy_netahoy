@@ -9,9 +9,7 @@ use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_replicon::prelude::*;
 
 use crate::{
-    math::{
-        ray_segment_capsule_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample,
-    },
+    math::{ray_hitbox_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
     world::NetAhoyWorldServerPlugin,
@@ -154,10 +152,9 @@ impl LagCompensationHistory {
         sample_buffer_at(self.poses.get(&player_id)?, server_time)
     }
 
-    pub fn raycast_capsules_at_time(
-        &self,
-        cast: LagCompensatedCapsuleCast,
-    ) -> Option<LagCompensatedCapsuleHit> {
+    /// Ray-test every player's hitbox (the movement cylinder) as it stood at
+    /// `server_time` — the timestamp the shooter's client sampled its screen at.
+    pub fn raycast_hitboxes_at_time(&self, cast: LagCompensatedCast) -> Option<LagCompensatedHit> {
         let direction = cast.direction.try_normalize()?;
 
         self.poses
@@ -166,15 +163,15 @@ impl LagCompensationHistory {
             .filter(|player_id| cast.ignored_player != Some(*player_id))
             .filter_map(|player_id| {
                 let pose = self.pose_at_time(player_id, cast.server_time)?;
-                let distance = ray_segment_capsule_distance(
+                let distance = ray_hitbox_distance(
                     cast.origin,
                     direction,
                     cast.max_distance,
-                    pose.position - Vec3::Y * cast.half_height,
-                    pose.position + Vec3::Y * cast.half_height,
+                    pose.position,
                     cast.radius,
+                    cast.half_height,
                 )?;
-                Some(LagCompensatedCapsuleHit {
+                Some(LagCompensatedHit {
                     player_id,
                     position: cast.origin + direction * distance,
                     distance,
@@ -185,7 +182,7 @@ impl LagCompensationHistory {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct LagCompensatedCapsuleCast {
+pub struct LagCompensatedCast {
     pub server_time: RemoteRenderTime,
     pub origin: Vec3,
     pub direction: Vec3,
@@ -196,7 +193,7 @@ pub struct LagCompensatedCapsuleCast {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LagCompensatedCapsuleHit {
+pub struct LagCompensatedHit {
     pub player_id: PlayerId,
     pub position: Vec3,
     pub distance: f32,

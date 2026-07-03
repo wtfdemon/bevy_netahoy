@@ -18,6 +18,7 @@ use ahoy_replicon::{
 
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
 pub const FLYING_TARGET_PLAYER_ID: u64 = 9_001;
+pub const WALKING_TARGET_PLAYER_ID: u64 = 9_002;
 pub struct ExampleSharedPlugin;
 
 impl Plugin for ExampleSharedPlugin {

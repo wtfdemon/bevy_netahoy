@@ -69,6 +69,11 @@ pub struct AhoyUserCmd {
     pub movement: Vec2,
     pub look: Vec2,
     pub buttons: AhoyButtons,
+    /// Newest server tick the client had applied when it built this command —
+    /// the tick its remote player capsules are clamped to. The server sweeps
+    /// rocket-vs-player at this tick via lag-comp history, so both peers judge
+    /// hits against the same poses and the client's prediction holds.
+    pub seen_server_tick: u64,
 }
 
 #[derive(Event, Serialize, Deserialize, Clone, Debug, Default)]

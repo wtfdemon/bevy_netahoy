@@ -55,7 +55,7 @@ impl Plugin for ServerPlugin {
             .add_systems(Startup, setup_server)
             .add_systems(
                 FixedPreUpdate,
-                (update_flying_target, reset_fallen_players)
+                (update_scripted_targets, reset_fallen_players)
                     .chain()
                     .after(ServerNetAhoySystems::ApplyCommands),
             );
@@ -72,6 +72,7 @@ fn setup_server(mut commands: Commands) {
         ));
     spawn_world_colliders(&mut commands);
     spawn_flying_target(&mut commands);
+    spawn_walking_target(&mut commands);
     vehicle::spawn_buggy(&mut commands, Vec3::new(-8.0, 1.5, 10.0));
 
     info!("websocket server listening on {DEFAULT_SERVER_URL}");
@@ -131,6 +132,30 @@ fn spawn_flying_target(commands: &mut Commands) {
     ));
 }
 
+/// Ground-level bot that paces back and forth — a rocket target you can stand
+/// next to (or on). Unlike the flying target it gets a real collider, so it is
+/// solid on the server and the client attaches its remote capsule as usual.
+fn spawn_walking_target(commands: &mut Commands) {
+    let position = walking_target_position(0);
+    commands.spawn((
+        Name::new("walking target player"),
+        Replicated,
+        NetworkedPlayer,
+        PlayerId(WALKING_TARGET_PLAYER_ID),
+        AhoySnapshot::default(),
+        ServerCommandBuffer::default(),
+        CharacterLook::default(),
+        CharacterControllerState::default(),
+        RigidBody::Static,
+        Collider::cylinder(0.45, 1.5),
+        player_collision_layers(),
+        Position::new(position),
+        Rotation::IDENTITY,
+        LinearVelocity::ZERO,
+        Transform::from_translation(position),
+    ));
+}
+
 fn clean_up_disconnected_player(
     disconnected: On<Disconnected>,
     mut commands: Commands,
@@ -153,7 +178,7 @@ fn clean_up_disconnected_player(
     commands.entity(player).despawn();
 }
 
-fn update_flying_target(
+fn update_scripted_targets(
     tick: Res<ServerTick>,
     mut targets: Query<
         (
@@ -166,24 +191,32 @@ fn update_flying_target(
         Without<PlayerOwner>,
     >,
 ) {
-    let position = flying_target_position(tick.0);
-    let previous = flying_target_position(tick.0.saturating_sub(1));
-    let velocity = (position - previous) * FIXED_TIMESTEP_HZ as f32;
-    let yaw = velocity.x.atan2(velocity.z) + std::f32::consts::PI;
-
     for (player_id, mut physics_position, mut transform, mut velocity_component, mut look) in
         &mut targets
     {
-        if player_id.0 != FLYING_TARGET_PLAYER_ID {
-            continue;
-        }
+        let path: fn(u64) -> Vec3 = match player_id.0 {
+            FLYING_TARGET_PLAYER_ID => flying_target_position,
+            WALKING_TARGET_PLAYER_ID => walking_target_position,
+            _ => continue,
+        };
+        let position = path(tick.0);
+        let previous = path(tick.0.saturating_sub(1));
+        let velocity = (position - previous) * FIXED_TIMESTEP_HZ as f32;
 
         physics_position.0 = position;
         transform.translation = position;
         **velocity_component = velocity;
-        look.yaw = yaw;
+        look.yaw = velocity.x.atan2(velocity.z) + std::f32::consts::PI;
         look.pitch = 0.0;
     }
+}
+
+/// Paces ~2 m/s along Z near the spawn area, on the floor (capsule center at
+/// 0.75 = half the 1.5 cylinder height above the floor top at y=0).
+fn walking_target_position(tick: u64) -> Vec3 {
+    const CENTER: Vec3 = Vec3::new(-6.0, 0.75, 8.0);
+    let seconds = tick as f32 / FIXED_TIMESTEP_HZ as f32;
+    CENTER + Vec3::Z * (seconds * 0.7).sin() * 3.0
 }
 
 fn flying_target_position(tick: u64) -> Vec3 {

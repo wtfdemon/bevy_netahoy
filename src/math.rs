@@ -174,42 +174,22 @@ fn lerp_radians(from: f32, to: f32, alpha: f32) -> f32 {
     from + delta * alpha
 }
 
-pub fn ray_capsule_distance(
+/// Ray vs the player hitbox: a vertical cylinder identical to the movement
+/// collider (`Collider::cylinder(radius, half_height * 2)`). Movement, hit
+/// registration, and visuals all share this one shape — you hit exactly what
+/// you see, and what you see is exactly what blocks you.
+pub fn ray_hitbox_distance(
     origin: Vec3,
     direction: Vec3,
     max_distance: f32,
-    capsule_center: Vec3,
+    center: Vec3,
     radius: f32,
     half_height: f32,
 ) -> Option<f32> {
     let direction = direction.try_normalize()?;
-    ray_segment_capsule_distance(
-        origin,
-        direction,
-        max_distance,
-        capsule_center - Vec3::Y * half_height,
-        capsule_center + Vec3::Y * half_height,
-        radius,
-    )
-}
-
-pub(crate) fn ray_segment_capsule_distance(
-    origin: Vec3,
-    direction: Vec3,
-    max_distance: f32,
-    segment_a: Vec3,
-    segment_b: Vec3,
-    radius: f32,
-) -> Option<f32> {
-    let direction = direction.try_normalize()?;
-    let capsule_center = segment_a.midpoint(segment_b);
-    let capsule = Collider::capsule_endpoints(
-        radius,
-        segment_a - capsule_center,
-        segment_b - capsule_center,
-    );
-    let (distance, _) = capsule.cast_ray(
-        Position::new(capsule_center),
+    let cylinder = Collider::cylinder(radius, half_height * 2.0);
+    let (distance, _) = cylinder.cast_ray(
+        Position::new(center),
         Rotation::IDENTITY,
         origin,
         direction,
@@ -273,6 +253,35 @@ mod tests {
             "tangents must be ignored across long gaps, got y = {}",
             mid.position.y
         );
+    }
+
+    #[test]
+    fn hitbox_matches_movement_cylinder() {
+        let center = Vec3::new(0.0, 1.0, 0.0);
+
+        // Side-on: surface at exactly the radius.
+        let side =
+            ray_hitbox_distance(Vec3::new(5.0, 1.0, 0.0), Vec3::NEG_X, 100.0, center, 0.45, 0.75)
+                .unwrap();
+        assert!((side - (5.0 - 0.45)).abs() < 1e-3);
+
+        // The old capsule's cap reached y = center + 1.2; the cylinder tops
+        // out at +0.75. A side-on ray at +0.9 must now miss.
+        let over_head = ray_hitbox_distance(
+            Vec3::new(5.0, 1.9, 0.0),
+            Vec3::NEG_X,
+            100.0,
+            center,
+            0.45,
+            0.75,
+        );
+        assert!(over_head.is_none());
+
+        // Straight down onto the flat lid at y = center + 0.75.
+        let top =
+            ray_hitbox_distance(Vec3::new(0.2, 5.0, 0.0), Vec3::NEG_Y, 100.0, center, 0.45, 0.75)
+                .unwrap();
+        assert!((top - (5.0 - 1.75)).abs() < 1e-3);
     }
 
     #[test]

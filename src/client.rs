@@ -528,6 +528,7 @@ fn interpolate_remote_players(
 fn drive_prediction_and_send_input(
     mut commands: Commands,
     input: Res<ClientInput>,
+    clock: Res<ClientServerClock>,
     mut input_state: ResMut<ClientInputState>,
     mut command_history: ResMut<LocalCommandHistory>,
     predictions: Query<Entity, With<ClientPredictionKcc>>,
@@ -542,6 +543,7 @@ fn drive_prediction_and_send_input(
         movement: input.movement.clamp_length_max(1.0),
         look: input.look,
         buttons: input.buttons,
+        seen_server_tick: clock.latest_server_tick,
     };
 
     if let Err(err) = stepper.step(predicted_entity, command, input_state.previous_buttons) {

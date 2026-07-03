@@ -357,7 +357,7 @@ fn attach_player_meshes(
         };
 
         commands.entity(entity).insert((
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color,
                 alpha_mode,
@@ -425,7 +425,7 @@ fn spawn_client_prediction_kcc(
                 Position::new(position),
                 Rotation::IDENTITY,
                 LinearVelocity::ZERO,
-                Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+                Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgba(0.1, 1.0, 0.45, 0.38),
                     alpha_mode: AlphaMode::Blend,
@@ -440,7 +440,7 @@ fn spawn_client_prediction_kcc(
         commands.spawn((
             Name::new("local presentation player"),
             LocalPresentationPlayer { prediction_entity },
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(1.0, 0.83, 0.22),
                 perceptual_roughness: 0.7,
@@ -529,7 +529,7 @@ fn spawn_remote_player_visuals(
                 yaw: look.x,
                 pitch: look.y,
             },
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: player_display_color(*player_id),
                 perceptual_roughness: 0.75,
