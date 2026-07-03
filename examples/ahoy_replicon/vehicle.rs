@@ -27,7 +27,6 @@
 use std::f32::consts::FRAC_PI_2;
 
 use aeronet::io::connection::Disconnected;
-use avian3d::physics_transform::ApplyPosToTransform;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_netahoy::{
@@ -835,16 +834,17 @@ fn attach_vehicle_bodies(
         commands.entity(server_entity).insert((
             chassis_collider(),
             vehicle_collision_layers(),
+            // Static, not kinematic: the KCC only treats colliders attached to
+            // a rigid body as solid (bevy_ahoy resolves surfaces through
+            // `ColliderOf`, which bare colliders lack), and static bodies
+            // never integrate velocity — so `apply_body_snapshots` stays the
+            // sole author of this pose. Having a body also keeps avian's
+            // Position → Transform sync in the safe (forward) direction.
+            RigidBody::Static,
             // The client owns these outright: seeded here, then written only
             // by `apply_body_snapshots`. Nothing replicates into them.
             Position::new(snapshot.position),
             Rotation(snapshot.rotation),
-            // No RigidBody here, so avian won't sync Position → Transform on
-            // its own — and its *reverse* sync then stomps Position back to a
-            // stale Transform whenever Position sits untouched for a physics
-            // tick. This marker opts into the forward sync, and the seeded
-            // Transform keeps them equal even on the very first tick.
-            ApplyPosToTransform,
             Transform::from_translation(snapshot.position).with_rotation(snapshot.rotation),
         ));
 

@@ -583,10 +583,10 @@ fn gather_client_input(
         AhoyButtons::MANTLE,
         keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyE),
     );
-    buttons.set(
+/*     buttons.set(
         AhoyButtons::CRANE,
         keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyQ),
-    );
+    ); */
     buttons.set(AhoyButtons::CLIMBDOWN, keys.pressed(KeyCode::KeyZ));
     buttons.set(AhoyButtons::SWIM_UP, keys.pressed(KeyCode::Space));
     buttons.set(

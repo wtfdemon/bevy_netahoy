@@ -169,7 +169,7 @@ pub fn spawn_world_render(
 
 pub fn player_controller() -> CharacterController {
     CharacterController {
-        //    filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
+            filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
         air_acceleration_hz: 120.0,
         speed: 6.5,
