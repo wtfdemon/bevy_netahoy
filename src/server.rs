@@ -46,6 +46,7 @@ impl Plugin for ServerNetAhoyPlugin {
                 FixedLast,
                 (
                     publish_authoritative_player_snapshots,
+                    publish_body_snapshots,
                     record_lag_compensation_history,
                 )
                     .chain()
@@ -276,6 +277,34 @@ fn publish_authoritative_player_snapshots(
         snapshot.velocity = **velocity;
         snapshot.look = Vec2::new(look.yaw, look.pitch);
         snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
+    }
+}
+
+/// Keep each replicated body's [`BodySnapshot`] in sync with its physics, so
+/// the pose crosses the wire as one atomic, tick-stamped sample instead of
+/// live engine components. Only writes on change, so a parked body goes quiet.
+fn publish_body_snapshots(
+    tick: Res<ServerTick>,
+    mut bodies: Query<(
+        &mut BodySnapshot,
+        &Position,
+        &Rotation,
+        &LinearVelocity,
+        &AngularVelocity,
+    )>,
+) {
+    for (mut snapshot, position, rotation, linear_velocity, angular_velocity) in &mut bodies {
+        let next = BodySnapshot {
+            tick: tick.0,
+            position: position.0,
+            rotation: rotation.0,
+            linear_velocity: linear_velocity.0,
+            angular_velocity: angular_velocity.0,
+        };
+        // Compare everything but the tick so an unchanged pose stays unwritten.
+        if (BodySnapshot { tick: snapshot.tick, ..next }) != *snapshot {
+            *snapshot = next;
+        }
     }
 }
 

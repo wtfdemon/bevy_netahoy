@@ -1,9 +1,11 @@
 //! Owner-authoritative buggy: the driving client simulates the vehicle as a
 //! real Avian dynamic body against its local world colliders and streams the
-//! resulting pose to the server ([`VehicleState`]), which applies it verbatim
-//! and lets ordinary replication fan it out. Zero input latency for the
-//! driver, real collisions and bounces, and the netcode library never learns
-//! vehicles exist.
+//! resulting pose to the server ([`VehicleState`]), which applies it verbatim.
+//! The library's [`BodySnapshot`] — an inert, tick-stamped pose sample, never
+//! live physics components — fans it out to everyone; `apply_body_snapshots`
+//! is the one airlock where network state enters this client's physics world.
+//! Zero input latency for the driver, real collisions and bounces, and the
+//! netcode library never learns vehicles exist.
 //!
 //! Boarding despawns the player's server entity — while driving there is no
 //! capsule to predict, reconcile, or hide, and the client's prediction loop
@@ -29,8 +31,8 @@ use avian3d::physics_transform::ApplyPosToTransform;
 use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_netahoy::{
-    rocket_impulse, ClientInput, LocalPlayerId, PlayerId, PlayerOwner, Rocket, RocketHit,
-    BLAST_REFERENCE_MASS, FIXED_TIMESTEP_HZ, ROCKET_FIRE, WORLD_COLLISION_LAYER,
+    rocket_impulse, BodySnapshot, ClientInput, LocalPlayerId, PlayerId, PlayerOwner, Rocket,
+    RocketHit, BLAST_REFERENCE_MASS, FIXED_TIMESTEP_HZ, ROCKET_FIRE, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
@@ -527,6 +529,9 @@ pub fn spawn_buggy(commands: &mut Commands, translation: Vec3) {
         Vehicle,
         Home(translation),
         Replicated,
+        // The only thing that crosses the wire: the library keeps it in sync
+        // with the physics components below every tick.
+        BodySnapshot::default(),
         RigidBody::Dynamic,
         // Blast impulses write velocity out-of-band; never let it sleep through one.
         SleepingDisabled,
@@ -534,8 +539,6 @@ pub fn spawn_buggy(commands: &mut Commands, translation: Vec3) {
         vehicle_collision_layers(),
         Mass(CHASSIS_MASS),
         Position::new(translation),
-        // Explicit so the initial replication carries a rotation.
-        Rotation::default(),
         Transform::from_translation(translation),
     ));
 }
@@ -801,6 +804,7 @@ pub fn add_client_vehicles(app: &mut App) {
         .add_systems(
             Update,
             (
+                apply_body_snapshots,
                 send_board_requests,
                 manage_local_sim,
                 fire_vehicle_rockets,
@@ -815,24 +819,33 @@ pub fn add_client_vehicles(app: &mut App) {
 
 /// New replicated vehicle: give it a client-side collider (so KCC prediction
 /// treats it as world geometry, mirroring the server) and spawn its visual.
+/// Runs once the first real snapshot is in (tick 0 = spawn default), retrying
+/// each frame until then — so the collider and visual are born at the true
+/// pose, never at the origin.
 fn attach_vehicle_bodies(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    added: Query<(Entity, &Position, &Rotation), Added<Vehicle>>,
+    added: Query<(Entity, &BodySnapshot), (With<Vehicle>, Without<Collider>)>,
 ) {
-    for (server_entity, position, rotation) in &added {
+    for (server_entity, snapshot) in &added {
+        if snapshot.tick == 0 {
+            continue;
+        }
         commands.entity(server_entity).insert((
             chassis_collider(),
             vehicle_collision_layers(),
+            // The client owns these outright: seeded here, then written only
+            // by `apply_body_snapshots`. Nothing replicates into them.
+            Position::new(snapshot.position),
+            Rotation(snapshot.rotation),
             // No RigidBody here, so avian won't sync Position → Transform on
-            // its own — and its *reverse* sync then stomps the replicated
-            // Position back to the stale (identity) Transform whenever a
-            // replication gap leaves Position untouched for a physics tick.
-            // This marker opts into the forward sync, and the seeded Transform
-            // keeps them equal even on the very first tick.
+            // its own — and its *reverse* sync then stomps Position back to a
+            // stale Transform whenever Position sits untouched for a physics
+            // tick. This marker opts into the forward sync, and the seeded
+            // Transform keeps them equal even on the very first tick.
             ApplyPosToTransform,
-            Transform::from_translation(position.0).with_rotation(rotation.0),
+            Transform::from_translation(snapshot.position).with_rotation(snapshot.rotation),
         ));
 
         let body = materials.add(StandardMaterial {
@@ -857,7 +870,7 @@ fn attach_vehicle_bodies(
                     CHASSIS_HALF.z * 2.0,
                 ))),
                 MeshMaterial3d(body),
-                Transform::from_translation(position.0).with_rotation(rotation.0),
+                Transform::from_translation(snapshot.position).with_rotation(snapshot.rotation),
                 Visibility::Visible,
             ))
             .with_children(|parent| {
@@ -874,6 +887,21 @@ fn attach_vehicle_bodies(
     }
 }
 
+/// The airlock: the only writer of the replicated copy's client-side physics
+/// pose. Copies unconditionally every frame, so avian never sees an
+/// "unchanged" Position it might reconcile against a stale Transform.
+fn apply_body_snapshots(
+    mut vehicles: Query<(&BodySnapshot, &mut Position, &mut Rotation), With<Vehicle>>,
+) {
+    for (snapshot, mut position, mut rotation) in &mut vehicles {
+        if snapshot.tick == 0 {
+            continue;
+        }
+        position.0 = snapshot.position;
+        rotation.0 = snapshot.rotation;
+    }
+}
+
 fn send_board_requests(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) {
     if keys.just_pressed(KeyCode::KeyG) {
         commands.client_trigger(BoardVehicle);
@@ -887,10 +915,7 @@ fn send_board_requests(keys: Res<ButtonInput<KeyCode>>, mut commands: Commands) 
 fn manage_local_sim(
     mut commands: Commands,
     local: Res<LocalPlayerId>,
-    vehicles: Query<
-        (Entity, &Position, &Rotation, Option<&LinearVelocity>, Option<&Driver>),
-        With<Vehicle>,
-    >,
+    vehicles: Query<(Entity, &BodySnapshot, Option<&Driver>), With<Vehicle>>,
     sims: Query<(Entity, &LocalVehicleSim)>,
 ) {
     let driven = vehicles
@@ -906,7 +931,7 @@ fn manage_local_sim(
         }
     }
 
-    if let Some((vehicle, position, rotation, velocity, _)) = driven
+    if let Some((vehicle, snapshot, _)) = driven
         && !sims.iter().any(|(_, sim)| sim.server_entity == vehicle)
     {
         commands.entity(vehicle).insert(ColliderDisabled);
@@ -923,11 +948,13 @@ fn manage_local_sim(
             chassis_collider(),
             vehicle_collision_layers(),
             Mass(CHASSIS_MASS),
-            *position,
-            *rotation,
-            LinearVelocity(velocity.map(|velocity| velocity.0).unwrap_or_default()),
-            AngularVelocity::default(),
-            Transform::from_translation(position.0).with_rotation(rotation.0),
+            // Authority transfer: the sim takes over exactly where the last
+            // snapshot left off — a tumbling buggy keeps tumbling.
+            Position::new(snapshot.position),
+            Rotation(snapshot.rotation),
+            LinearVelocity(snapshot.linear_velocity),
+            AngularVelocity(snapshot.angular_velocity),
+            Transform::from_translation(snapshot.position).with_rotation(snapshot.rotation),
         ));
     }
 }
@@ -1028,7 +1055,7 @@ fn update_vehicle_visuals(
     time: Res<Time>,
     mut visuals: Query<(&VehicleVisual, &mut Transform)>,
     sims: Query<(&LocalVehicleSim, &Transform), Without<VehicleVisual>>,
-    vehicles: Query<(&Position, &Rotation), With<Vehicle>>,
+    vehicles: Query<&BodySnapshot, With<Vehicle>>,
 ) {
     let alpha = 1.0 - (-VISUAL_FOLLOW_RATE * time.delta_secs()).exp();
     for (visual, mut transform) in &mut visuals {
@@ -1037,9 +1064,11 @@ fn update_vehicle_visuals(
             .find(|(sim, _)| sim.server_entity == visual.server_entity)
         {
             *transform = *sim_transform;
-        } else if let Ok((position, rotation)) = vehicles.get(visual.server_entity) {
-            transform.translation = transform.translation.lerp(position.0, alpha);
-            transform.rotation = transform.rotation.slerp(rotation.0, alpha);
+        } else if let Ok(snapshot) = vehicles.get(visual.server_entity)
+            && snapshot.tick != 0
+        {
+            transform.translation = transform.translation.lerp(snapshot.position, alpha);
+            transform.rotation = transform.rotation.slerp(snapshot.rotation, alpha);
         }
     }
 }

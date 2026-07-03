@@ -5,7 +5,6 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_ahoy::{MantleState, prelude::*};
 use bevy_replicon::prelude::*;
