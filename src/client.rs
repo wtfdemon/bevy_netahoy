@@ -16,7 +16,9 @@ use crate::{
 pub const USERCMD_BACKUP_COUNT: usize = 8;
 pub const PREDICTION_HISTORY_CAPACITY: usize = 256;
 pub const REMOTE_INTERPOLATION_CAPACITY: usize = 64;
-pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 6;
+/// 4 ticks = 200 ms at 20 Hz. Two ticks of headroom over the minimum pair to
+/// interpolate between; capped extrapolation covers the gaps loss opens up.
+pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 2;
 pub const REMOTE_CLOCK_MAX_CATCHUP_RATE: f64 = 0.10;
 pub const IGNORE_XZ_ERROR: f32 = 0.035;
 pub const IGNORE_GROUNDED_Y_ERROR: f32 = 0.20;
