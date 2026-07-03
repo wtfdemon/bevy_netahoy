@@ -28,13 +28,7 @@ impl Plugin for NetAhoyProtocolPlugin {
         app.replicate::<NetworkedPlayer>()
             .replicate::<PlayerId>()
             .replicate::<AhoySnapshot>()
-            // Non-player movers (vehicles, props) replicate the authoritative
-            // physics pose, not Transform: Transform is presentation state and
-            // stays client-owned (free for smoothing), and scale never rides
-            // along. Players are excluded — their pose flows via AhoySnapshot.
-            .replicate_filtered::<Position, Without<AhoySnapshot>>()
-            .replicate_filtered::<Rotation, Without<AhoySnapshot>>()
-            .replicate_filtered::<LinearVelocity, Without<AhoySnapshot>>()
+            .replicate::<BodySnapshot>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
             .add_server_event::<JoinAccepted>(Channel::Ordered)
             .add_client_event::<AhoyUserCmdPacket>(Channel::Unreliable);
@@ -125,6 +119,26 @@ pub struct AhoySnapshot {
     pub velocity: Vec3,
     pub look: Vec2,
     pub state: NetAhoyMoveState,
+}
+
+/// [`AhoySnapshot`]'s sibling for plain rigid bodies (vehicles, props): the
+/// authoritative pose + velocities as one atomic, tick-stamped sample. This is
+/// the *only* thing a non-player mover puts on the wire — never live physics
+/// components, so neither peer's physics engine can fight replication over
+/// them. The server keeps it fresh via `publish_body_snapshots`; a game spawns
+/// the body with `BodySnapshot::default()` and consumes it client-side with
+/// explicitly-owned systems (a tick of 0 means "not yet published").
+///
+/// Velocities ride along because they're the cheapest bytes on the wire:
+/// extrapolation through loss, interpolation tangents, sim seeding on
+/// authority transfer, and blast responses all want them.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct BodySnapshot {
+    pub tick: u64,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub linear_velocity: Vec3,
+    pub angular_velocity: Vec3,
 }
 
 pub fn sequence_is_newer(incoming: u32, current: u32) -> bool {
