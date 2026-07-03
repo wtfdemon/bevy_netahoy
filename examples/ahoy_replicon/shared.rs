@@ -169,7 +169,12 @@ pub fn spawn_world_render(
 
 pub fn player_controller() -> CharacterController {
     CharacterController {
-            filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
+        // World + other players. Both peers build the KCC from this one
+        // function, so prediction and server resolve movement against the
+        // same set: world geometry, vehicle chassis (world-layer members),
+        // and player capsules (client-side: static capsules at the newest
+        // snapshot pose — see `attach_remote_player_colliders`).
+        filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER | PLAYER_COLLISION_LAYER),
         acceleration_hz: 10.0,
         air_acceleration_hz: 120.0,
         speed: 6.5,

@@ -148,6 +148,8 @@ impl Plugin for ClientPlugin {
                     sync_debug_ghosts_from_snapshots,
                     spawn_client_prediction_kcc,
                     spawn_remote_player_visuals,
+                    attach_remote_player_colliders,
+                    apply_remote_player_capsule_poses,
                     toggle_remote_ghost_debug,
                     update_camera_from_local_presentation,
                     update_speed_text,
@@ -447,6 +449,49 @@ fn spawn_client_prediction_kcc(
             Transform::from_translation(position),
             Visibility::default(),
         ));
+    }
+}
+
+/// Remote players get a solid capsule at their newest-snapshot pose, so
+/// prediction collides where the server will — NOT at the interpolated visual
+/// pose, which is ~200 ms in the past. Standing players block perfectly;
+/// running ones cost a small (~RTT) ghost offset, the accepted trade.
+/// `RigidBody::Static` per the KCC-solidity rule: the controller only treats
+/// colliders attached to a body as solid, and static bodies never integrate
+/// velocity, so the airlock below stays the pose's only author. The local
+/// player's ghost never matches (no `RemoteInterpolationBuffer`), and the
+/// flying target is skipped — it has no server collider, so a client capsule
+/// would make prediction collide with something the server ghosts through.
+fn attach_remote_player_colliders(
+    mut commands: Commands,
+    remotes: Query<
+        (Entity, &PlayerId, &AhoySnapshot),
+        (With<RemoteInterpolationBuffer>, Without<Collider>),
+    >,
+) {
+    for (entity, player_id, snapshot) in &remotes {
+        if player_id.0 == FLYING_TARGET_PLAYER_ID || snapshot.server_tick == 0 {
+            continue;
+        }
+        commands.entity(entity).insert((
+            Collider::cylinder(PLAYER_CAPSULE_RADIUS, 1.5),
+            player_collision_layers(),
+            RigidBody::Static,
+            Position::new(snapshot.position),
+        ));
+    }
+}
+
+/// The airlock for remote player capsules: newest snapshot → Position, every
+/// frame, unconditionally. (The flying target never gets a Position, so it
+/// never matches.)
+fn apply_remote_player_capsule_poses(
+    mut remotes: Query<(&AhoySnapshot, &mut Position), With<RemoteInterpolationBuffer>>,
+) {
+    for (snapshot, mut position) in &mut remotes {
+        if snapshot.server_tick != 0 {
+            position.0 = snapshot.position;
+        }
     }
 }
 
