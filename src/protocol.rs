@@ -11,6 +11,8 @@ use bevy_replicon::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+use crate::player::{RocketFired, RocketHit};
+
 pub const DEFAULT_PORT: u16 = 5000;
 pub const FIXED_TIMESTEP_HZ: f64 = 20.0;
 pub const DEFAULT_SERVER_ADDR: SocketAddr =
@@ -30,7 +32,9 @@ impl Plugin for NetAhoyProtocolPlugin {
             .replicate::<BodySnapshot>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
             .add_server_event::<JoinAccepted>(Channel::Ordered)
-            .add_client_event::<AhoyUserCmdPacket>(Channel::Unreliable);
+            .add_client_event::<AhoyUserCmdPacket>(Channel::Unreliable)
+            .add_server_event::<RocketFired>(Channel::Ordered)
+            .add_server_event::<RocketHit>(Channel::Ordered);
     }
 }
 
@@ -114,7 +118,7 @@ impl NetAhoyMoveState {
     }
 }
 
-#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoySnapshot {
     pub server_tick: u64,
     pub last_processed_sequence: u32,

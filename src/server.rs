@@ -12,7 +12,7 @@ use crate::{
     math::{ray_hitbox_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
-    world::NetAhoyWorldServerPlugin,
+    player::{process_rocket_events, NetAhoyPlayerEvents},
 };
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
@@ -31,14 +31,17 @@ pub struct ServerNetAhoyPlugin;
 
 impl Plugin for ServerNetAhoyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(NetAhoyWorldServerPlugin)
-            .init_resource::<ServerTick>()
+        app.init_resource::<ServerTick>()
             .init_resource::<LagCompensationHistory>()
+            .init_resource::<NetAhoyPlayerEvents>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
             .add_systems(
                 FixedPreUpdate,
-                apply_player_commands.in_set(ServerNetAhoySystems::ApplyCommands),
+                (
+                    apply_player_commands.in_set(ServerNetAhoySystems::ApplyCommands),
+                    process_rocket_events.after(ServerNetAhoySystems::ApplyCommands),
+                ),
             )
             .add_systems(
                 FixedLast,
@@ -232,7 +235,7 @@ fn apply_player_commands(
                 break;
             };
 
-            if let Err(err) = stepper.step(player, command, command_buffer.last_buttons) {
+            if let Err(err) = stepper.player_move(player, command, command_buffer.last_buttons) {
                 warn!(
                     "failed to step server KCC for {player} command {}: {err}",
                     command.sequence

@@ -11,7 +11,7 @@ use crate::{
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
-    world::NetAhoyWorldClientPlugin,
+    player::NetAhoyPlayerState,
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
@@ -40,8 +40,7 @@ pub struct ClientNetAhoyPlugin;
 
 impl Plugin for ClientNetAhoyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(NetAhoyWorldClientPlugin)
-            .init_resource::<LocalPlayerId>()
+        app.init_resource::<LocalPlayerId>()
             .init_resource::<ClientInput>()
             .init_resource::<ClientInputState>()
             .init_resource::<PredictionHistory>()
@@ -125,7 +124,7 @@ pub struct ServerTruthGhost;
 /// The locally simulated KCC the camera and gameplay should treat as the
 /// player. Spawned by the game when its [`ServerTruthGhost`] appears.
 #[derive(Component)]
-#[require(PredictionCorrection)]
+#[require(PredictionCorrection, NetAhoyPlayerState)]
 pub struct ClientPredictionKcc {
     pub server_entity: Entity,
 }
@@ -567,7 +566,7 @@ fn drive_prediction_and_send_input(
         seen_server_tick: clock.latest_server_tick,
     };
 
-    if let Err(err) = stepper.step(predicted_entity, command, input_state.previous_buttons) {
+    if let Err(err) = stepper.player_move(predicted_entity, command, input_state.previous_buttons) {
         warn!(
             "failed to step predicted KCC for command {}: {err}",
             command.sequence
@@ -663,16 +662,20 @@ fn reconcile_local_prediction(
     let current_position = stepper.position(predicted_entity).unwrap_or(snapshot.position);
     let old_visible_position = current_position + correction.presentation_offset;
     let replay_commands = command_history.after_sequence(snapshot.last_processed_sequence);
-    let local_state = ack_frame
-        .as_ref()
-        .map(|ack_frame| (&ack_frame.controller_state, &ack_frame.accumulated_input));
+    let local_state = ack_frame.as_ref().map(|ack_frame| {
+        (
+            &ack_frame.controller_state,
+            &ack_frame.accumulated_input,
+            &ack_frame.player_state,
+        )
+    });
 
     stepper.restore(predicted_entity, snapshot, local_state);
 
     let replayed = replay_commands.len();
     let mut previous_buttons = snapshot.last_processed_buttons;
     for command in replay_commands {
-        if let Err(err) = stepper.step(predicted_entity, command, previous_buttons) {
+        if let Err(err) = stepper.player_move(predicted_entity, command, previous_buttons) {
             warn!(
                 "failed to replay predicted KCC for command {}: {err}",
                 command.sequence

@@ -1,5 +1,5 @@
 //! Client-only rocket eye candy. The blast simulation lives in the library
-//! (`bevy_netahoy::world`); this just draws the trail and explosion marker by
+//! (`bevy_netahoy::player`); this just draws the trail and explosion marker by
 //! tracing the same rocket the predictor fires off the predicted player.
 #![allow(dead_code)]
 

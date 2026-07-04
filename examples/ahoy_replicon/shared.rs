@@ -6,9 +6,9 @@ use avian3d::prelude::*;
 use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_netahoy::{
-    apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetworkedPlayer,
-    PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer, FIXED_TIMESTEP_HZ,
-    PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
+    apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetAhoyPlayerState,
+    NetworkedPlayer, PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer,
+    FIXED_TIMESTEP_HZ, PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
@@ -207,6 +207,7 @@ pub fn spawn_player(
         PlayerOwner(client),
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
+        NetAhoyPlayerState::default(),
         CharacterLook::default(),
         player_controller(),
         Collider::cylinder(0.45, 1.5),

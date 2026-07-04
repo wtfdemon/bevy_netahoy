@@ -1,21 +1,19 @@
-//! Predicted, traveling rockets. The whole movement-extra story now: fire a
-//! rocket, it flies, it knocks you (and others) around.
+//! The game-state POD, Quake style: one plain struct per player
+//! ([`NetAhoyPlayerState`]) that rides [`AhoyPredictionFrame`] whole, stepped by
+//! [`step_player_state`] right after the movement step on both peers. Rewind restores
+//! the clone from the frame at the ack and replay re-runs the commands — no
+//! ack bookkeeping, no separate rollback machinery. To extend, add fields to
+//! the POD and logic to `step_player_state` (this is the `pmove`/`playerState_t`
+//! pattern; fork it like it's `bg_pmove.c`).
 //!
-//! A rocket is *closed-form*: one raycast at fire time fixes its whole path, so
-//! its position and detonation are pure functions of how many ticks have elapsed
-//! since it was fired. That's what makes it correct under the client's
-//! rewind+replay without storing anything in the rollback frame — on rewind we
-//! drop rockets fired after the ack and replay re-fires them, and blasts
-//! re-derive whenever a step crosses the fuse tick. Detonating never removes a
-//! rocket (a later rewind may need to replay across it); rockets leave the
-//! deque only through [`NetAhoyWorld::retire`], once the ack passes their
-//! detonation. Deque + ack can always reconstruct any suffix of the timeline.
+//! Rockets stay *closed-form*: one raycast at fire time fixes the whole path,
+//! so position and detonation are pure functions of elapsed ticks. That keeps
+//! replay deterministic — a re-fired rocket rebuilds identically from the
+//! command stream. A rocket is removed the moment it blasts; older frames hold
+//! their own copies, so any rewind that needs to replay across the blast just
+//! re-derives it.
 //!
-//! [`NetAhoyWorld`] + [`step_world`] run on both peers (shared movement step);
-//! the client also prunes on rewind, the server only steps forward. Same consts,
-//! same math, so prediction matches the server with no correction.
-
-use std::collections::VecDeque;
+//! [`AhoyPredictionFrame`]: crate::step::AhoyPredictionFrame
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -23,9 +21,8 @@ use bevy_replicon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
-    sequence_is_newer, AhoyButtons, AhoySnapshot, AhoyUserCmd, PlayerId, FIXED_TIMESTEP_HZ,
+    sequence_is_newer, AhoyButtons, AhoyUserCmd, PlayerId, FIXED_TIMESTEP_HZ,
 };
-use crate::server::{ServerCommandBuffer, ServerNetAhoySystems};
 
 /// Library-owned collision layers, so the colliders the game spawns and the
 /// rocket raycast here agree on one numbering.
@@ -39,7 +36,8 @@ pub const ROCKET_FIRE: AhoyButtons = AhoyButtons::from_bits_retain(1 << 16);
 const EYE_HEIGHT: f32 = 0.6;
 const SPEED: f32 = 42.0;
 const LIFETIME_SECONDS: f32 = 1.35;
-const SPLASH_RADIUS: f32 = 4.0;
+/// Public so game code can judge "was I in the blast?" (e.g. hit reactions).
+pub const SPLASH_RADIUS: f32 = 4.0;
 const IMPULSE_SPEED: f32 = 42.0;
 /// A dynamic rigid body of this mass gets the same launch as a player; heavier
 /// bodies move proportionally less (`rocket_impulse` is a player velocity, so we
@@ -47,8 +45,11 @@ const IMPULSE_SPEED: f32 = 42.0;
 /// Public so game code applying blasts to its own bodies matches the server.
 pub const BLAST_REFERENCE_MASS: f32 = 40.0;
 const MAX_DISTANCE: f32 = SPEED * LIFETIME_SECONDS;
-/// Backstop against an abusive fire stream; rockets normally retire on detonation.
-const MAX_ROCKETS: usize = 64;
+/// In-flight cap. Physics bounds the legitimate count: 1.35 s lifetime at 20 Hz
+/// is 27 ticks, and edge-triggered fire lands at most every other tick, so ≤14
+/// rockets can coexist. Overflow means an abusive stream and the fire is
+/// declined — both peers run the same step, so the decline predicts cleanly.
+const MAX_ROCKETS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RocketId {
@@ -71,37 +72,10 @@ pub struct RocketHit {
     pub point: Vec3,
 }
 
-pub struct NetAhoyWorldServerPlugin;
-
-impl Plugin for NetAhoyWorldServerPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_server_event::<RocketFired>(Channel::Ordered)
-            .add_server_event::<RocketHit>(Channel::Ordered)
-            .init_resource::<NetAhoyWorld>()
-            .add_systems(
-                FixedPreUpdate,
-                process_rocket_events.after(ServerNetAhoySystems::ApplyCommands),
-            );
-    }
-}
-
-pub struct NetAhoyWorldClientPlugin;
-
-impl Plugin for NetAhoyWorldClientPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_server_event::<RocketFired>(Channel::Ordered)
-            .add_server_event::<RocketHit>(Channel::Ordered)
-            .init_resource::<NetAhoyWorld>()
-            .add_systems(
-                FixedLast,
-                (retire_acked_rockets, clear_predicted_rocket_events),
-            );
-    }
-}
-
 /// One rocket. Immutable after firing: the raycast bakes `start`/`dir`/
 /// `hit_distance`/`fuse_ticks`, everything else derives from elapsed ticks.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// `Default` is only the empty-slot filler for [`NetAhoyPlayerState`]'s array.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Rocket {
     pub owner: PlayerId,
     /// Owner's command sequence at the moment of firing.
@@ -127,7 +101,7 @@ impl Rocket {
         let dir = (explosion - start).normalize_or_zero();
         // distance / speed = seconds, * HZ = ticks. Rounds to 0 point-blank, so a
         // shot into a wall detonates the same tick it's fired (the detonation pass
-        // in step_world runs right after the rocket is pushed).
+        // in step_player_state runs right after the rocket is pushed).
         let fuse_ticks = (hit_distance / SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
         Self { owner, fired_sequence, start, dir, hit_distance, fuse_ticks }
     }
@@ -163,62 +137,47 @@ impl Rocket {
     }
 }
 
-/// Rockets in one place, kept until acked past their detonation. Lives on both
-/// peers; the client drops unacked fires on rewind (replay re-fires them), the
-/// server only steps forward. On the server it holds every player's rockets,
-/// so access is scoped by owner.
-#[derive(Resource)]
-pub struct NetAhoyWorld {
-    rockets: VecDeque<Rocket>,
-    rockets_fired: Vec<RocketFired>,
-    rockets_hit: Vec<RocketHit>,
+/// The per-player game POD. Lives as a component on the KCC entity on both
+/// peers; [`crate::step::NetAhoyStepper`] steps it, copies it into every
+/// prediction frame, and restores it whole on rewind. C-style on purpose:
+/// fixed storage, `Copy`, no heap — every clone the netcode makes is a memcpy.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct NetAhoyPlayerState {
+    rockets: [Rocket; MAX_ROCKETS],
+    rocket_count: usize,
 }
 
-impl Default for NetAhoyWorld {
+impl Default for NetAhoyPlayerState {
     fn default() -> Self {
         Self {
-            rockets: VecDeque::with_capacity(MAX_ROCKETS),
-            rockets_fired: Vec::with_capacity(MAX_ROCKETS),
-            rockets_hit: Vec::with_capacity(MAX_ROCKETS),
+            rockets: [Rocket::default(); MAX_ROCKETS],
+            rocket_count: 0,
         }
     }
 }
 
-impl NetAhoyWorld {
-    /// Rewind hook (client only): restore world-side prediction state to `ack`.
-    /// Keeps fires at or before the ack; replay re-fires the rest.
-    pub fn restore_world(&mut self, owner: PlayerId, ack: u32) {
-        self.rockets.retain(|r| {
-            if r.owner != owner {
-                return true; // other players' rockets are out of scope
-            }
-            !sequence_is_newer(r.fired_sequence, ack)
-        });
-    }
-
-    /// Drop `owner`'s rockets detonating at or before `seq` — the only way a
-    /// rocket leaves the deque. On the client `seq` is the server ack, so any
-    /// blast a replay can still cross stays re-derivable; the server calls it
-    /// with its own processed sequence.
-    pub fn retire(&mut self, owner: PlayerId, seq: u32) {
-        self.rockets.retain(|r| {
-            if r.owner != owner {
-                return true; // other players' rockets are out of scope
-            }
-            sequence_is_newer(r.detonation_sequence(), seq)
-        });
-    }
-
-    fn clear_transients(&mut self) {
-        self.rockets_fired.clear();
-        self.rockets_hit.clear();
+impl NetAhoyPlayerState {
+    /// The live rockets, e.g. for rendering in flight via [`Rocket::position_at`].
+    pub fn rockets(&self) -> &[Rocket] {
+        &self.rockets[..self.rocket_count]
     }
 }
 
-/// Advance one player's rockets for one command, inside the movement step.
-/// Fire on the rising edge, apply self-knockback when due, retire spent ones.
-pub fn step_world(
-    netahoy_world: &mut NetAhoyWorld,
+/// Server-only outbox: what [`step_player_state`] fired and blasted, drained into
+/// broadcasts by [`process_rocket_events`]. The client never creates it —
+/// prediction and replay would push duplicates, and client visuals come from
+/// the server events (or the game's own raycast).
+#[derive(Resource, Default)]
+pub struct NetAhoyPlayerEvents {
+    pub fired: Vec<RocketFired>,
+    pub hit: Vec<RocketHit>,
+}
+
+/// Advance one player's POD for one command, inside the movement step.
+/// Fire on the rising edge, blast rockets whose fuse is due, apply self-knockback.
+pub fn step_player_state(
+    state: &mut NetAhoyPlayerState,
+    events: Option<&mut NetAhoyPlayerEvents>,
     owner: PlayerId,
     command: &AhoyUserCmd,
     previous_buttons: AhoyButtons,
@@ -227,34 +186,43 @@ pub fn step_world(
     spatial: &SpatialQuery,
     velocity: &mut Vec3,
 ) {
+    let mut events = events;
     let firing = command.buttons.contains(ROCKET_FIRE);
     let was_firing = previous_buttons.contains(ROCKET_FIRE);
-    if firing && !was_firing {
-        if netahoy_world.rockets.len() == MAX_ROCKETS {
-            netahoy_world.rockets.pop_front();
-        }
+    if firing && !was_firing && state.rocket_count < MAX_ROCKETS {
         let rocket = Rocket::fire(owner, command.sequence, position, look, spatial);
-        netahoy_world.rockets_fired.push(rocket.fired_event());
-        netahoy_world.rockets.push_back(rocket);
+        state.rockets[state.rocket_count] = rocket;
+        state.rocket_count += 1;
+        if let Some(events) = events.as_deref_mut() {
+            events.fired.push(rocket.fired_event());
+        }
     }
 
-    // Blast this owner's rockets whose fuse lands exactly on this command.
-    // Detonating is a pure read — the rocket stays put, so a later rewind can
-    // replay across this tick and re-derive the same blast. Removal is
-    // [`NetAhoyWorld::retire`]'s job, driven by the ack. Collected first so
-    // the loop doesn't also borrow `netahoy_world` mutably.
-    let mut blasts = Vec::new();
-    for rocket in &netahoy_world.rockets {
-        if rocket.owner == owner && rocket.detonation_sequence() == command.sequence {
-            blasts.push(RocketHit {
+    // Blast rockets whose fuse lands on this command and drop them (swap-remove;
+    // order carries no meaning) — old frames keep their own copies, so a rewind
+    // that replays across the blast just re-derives it from its frame's POD.
+    // "At or before" instead of "exactly at": when the server loses the
+    // fuse-tick command, the blast lands on the next command it does process
+    // (a late blast tracks the client's prediction closer than no blast at all).
+    let mut index = 0;
+    while index < state.rocket_count {
+        let rocket = state.rockets[index];
+        if sequence_is_newer(rocket.detonation_sequence(), command.sequence) {
+            index += 1;
+            continue;
+        }
+
+        *velocity += rocket_impulse(rocket.detonation_point(), position);
+        if let Some(events) = events.as_deref_mut() {
+            events.hit.push(RocketHit {
                 id: rocket.id(),
                 point: rocket.detonation_point(),
             });
         }
-    }
-    for hit in blasts {
-        *velocity += rocket_impulse(hit.point, position);
-        netahoy_world.rockets_hit.push(hit);
+
+        state.rocket_count -= 1;
+        state.rockets[index] = state.rockets[state.rocket_count];
+        // No index bump: re-examine the rocket just swapped into this slot.
     }
 }
 
@@ -285,10 +253,10 @@ pub fn rocket_impulse(explosion: Vec3, player: Vec3) -> Vec3 {
 }
 
 /// Server-only: publish rocket events and push every *other* player caught in a
-/// blast this tick. The firer already got self-knockback in [`step_world`].
-fn process_rocket_events(
+/// blast this tick. The firer already got self-knockback in [`step_player_state`].
+pub fn process_rocket_events(
     mut commands: Commands,
-    mut netahoy_world: ResMut<NetAhoyWorld>,
+    mut events: ResMut<NetAhoyPlayerEvents>,
     // Players are selected by PlayerId, NOT by the absence of RigidBody: the
     // KCC is a kinematic rigid body (bevy_ahoy's CharacterController requires
     // RigidBody::Kinematic), so a RigidBody filter would silently reroute
@@ -298,23 +266,15 @@ fn process_rocket_events(
         (&RigidBody, &Position, &mut LinearVelocity, &ComputedMass),
         Without<PlayerId>,
     >,
-    progress: Query<(&PlayerId, &ServerCommandBuffer)>,
 ) {
-    // The server never rewinds, so its processed sequence retires directly —
-    // a blasted rocket leaves the same tick, and rockets whose fuse tick was
-    // lost with a dropped command get swept instead of lingering.
-    for (player_id, command_buffer) in &progress {
-        netahoy_world.retire(*player_id, command_buffer.last_processed_sequence);
-    }
-
-    for message in netahoy_world.rockets_fired.drain(..) {
+    for message in events.fired.drain(..) {
         commands.server_trigger(ToClients {
             mode: SendMode::Broadcast,
             message,
         });
     }
 
-    for hit in netahoy_world.rockets_hit.drain(..) {
+    for hit in events.hit.drain(..) {
         commands.server_trigger(ToClients {
             mode: SendMode::Broadcast,
             message: hit,
@@ -338,30 +298,5 @@ fn process_rocket_events(
             velocity.0 +=
                 rocket_impulse(hit.point, position.0) * (BLAST_REFERENCE_MASS * inverse_mass);
         }
-    }
-}
-
-// TODO: This shit is stupid. these two functions should be one, and retire_acked_rockets
-// doesn't query Option for NetAhoyWorld as it should. And also, why loop over every playerid
-// on the client? There's only one playerid we care about for client rockets.
-
-/// Client-only: retire rockets by the server ack. Runs every fixed tick, so
-/// spent rockets leave even while prediction is accurate and no rewind ever
-/// calls [`NetAhoyWorld::restore_world`].
-fn retire_acked_rockets(
-    mut netahoy_world: ResMut<NetAhoyWorld>,
-    snapshots: Query<(&PlayerId, &AhoySnapshot)>,
-) {
-    for (player_id, snapshot) in &snapshots {
-        if snapshot.last_processed_sequence != 0 {
-            netahoy_world.retire(*player_id, snapshot.last_processed_sequence);
-        }
-    }
-}
-
-/// Client-only: transient rocket queues are server-owned, so drop predicted ones.
-pub fn clear_predicted_rocket_events(netahoy_world: Option<ResMut<NetAhoyWorld>>) {
-    if let Some(mut netahoy_world) = netahoy_world {
-        netahoy_world.clear_transients();
     }
 }

@@ -1,5 +1,5 @@
 //! The movement context: one user command in, one movement step out.
-//! Prediction, replay, and the server all go through [`NetAhoyStepper::step`].
+//! Prediction, replay, and the server all go through [`NetAhoyStepper::player_move`].
 
 use avian3d::prelude::*;
 use bevy::{
@@ -10,7 +10,7 @@ use bevy::{
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
-use crate::world::{step_world, NetAhoyWorld};
+use crate::player::{step_player_state, NetAhoyPlayerState, NetAhoyPlayerEvents};
 
 /// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
 /// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
@@ -29,6 +29,7 @@ pub struct AhoyPredictionFrame {
     pub state: NetAhoyMoveState,
     pub controller_state: CharacterControllerState,
     pub accumulated_input: AccumulatedInput,
+    pub player_state: NetAhoyPlayerState,
 }
 
 #[derive(QueryData)]
@@ -41,6 +42,7 @@ pub struct PmoveParts {
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
     player_id: &'static PlayerId,
+    player_state: &'static mut NetAhoyPlayerState,
 }
 
 /// The movement context: all the Bevy bits a step needs, so callers stay short.
@@ -58,15 +60,14 @@ pub struct NetAhoyStepper<'w, 's> {
         ),
     >,
     fixed_time: Res<'w, Time<Fixed>>,
-    // The rocket world both peers step. Optional so a peer that skips it just
-    // runs movement without rockets (and the borrow stays clean).
-    netahoy_world: Option<ResMut<'w, NetAhoyWorld>>,
+    // Server-only outbox for what step_player_state fires/blasts; None on the client,
+    // where prediction and replay would push duplicates.
+    player_events: Option<ResMut<'w, NetAhoyPlayerEvents>>,
 }
 
 impl NetAhoyStepper<'_, '_> {
-    /// Run one command through one movement step. `previous_buttons` lets us spot
-    /// freshly pressed buttons (library bits for the controller, game bits for effects).
-    pub fn step(
+    /// Run one command through one movement step for one player. The infamous Quake `pmove`
+    pub fn player_move(
         &mut self,
         entity: Entity,
         command: AhoyUserCmd,
@@ -89,26 +90,24 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
 
-        self.handle_world(entity, &command, previous_buttons)
+        self.player_think(entity, &command, previous_buttons)
     }
 
-    /// Step world-side movement effects after the KCC step, so client replay and the
-    /// server compose identically. `step_world` needs [`SpatialQuery`] (p2)
-    /// alongside velocity (p1), which can't be borrowed at once, so we copy
-    /// velocity out, run it, then write back.
-    fn handle_world(
+    /// Step the game POD after the KCC step, so client replay and the server
+    /// compose identically. `step_player_state` needs [`SpatialQuery`] (p2) alongside
+    /// the POD and velocity (p1), which can't be borrowed at once, so we take
+    /// the POD out and copy velocity, run it, then write both back.
+    fn player_think(
         &mut self,
         entity: Entity,
         command: &AhoyUserCmd,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
-        let Some(netahoy_world) = self.netahoy_world.as_deref_mut() else {
-            return Ok(());
-        };
-        let (position, look, mut velocity, owner) = {
+        let (mut player_state, position, look, mut velocity, owner) = {
             let mut players = self.set.p1();
             let parts = players.get_mut(entity)?;
             (
+                *parts.player_state,
                 parts.transform.translation,
                 Vec2::new(parts.look.yaw, parts.look.pitch),
                 parts.velocity.0,
@@ -116,20 +115,23 @@ impl NetAhoyStepper<'_, '_> {
             )
         };
 
-        step_world(
-            netahoy_world,
+        let spatial = self.set.p2();
+        step_player_state(
+            &mut player_state,
+            self.player_events.as_deref_mut(),
             owner,
             command,
             previous_buttons,
             position,
             look,
-            &self.set.p2(),
+            &spatial,
             &mut velocity,
         );
 
         let mut players = self.set.p1();
         let mut parts = players.get_mut(entity)?;
         parts.velocity.0 = velocity;
+        *parts.player_state = player_state;
         Ok(())
     }
 
@@ -145,45 +147,40 @@ impl NetAhoyStepper<'_, '_> {
             state: NetAhoyMoveState::from_controller_state(&parts.state),
             controller_state: parts.state.clone(),
             accumulated_input: parts.input.clone(),
+            player_state: *parts.player_state,
         })
     }
 
     /// Rewind `entity` to an authoritative snapshot, reusing the locally
-    /// recorded controller/input state for that tick when available.
+    /// recorded controller/input/state for that tick when available.
     pub fn restore(
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &NetAhoyPlayerState)>,
     ) {
-        let restored_owner = {
-            let mut players = self.set.p1();
-            let Ok(mut parts) = players.get_mut(entity) else {
-                return;
-            };
-            let owner = *parts.player_id;
-
-            parts.transform.translation = snapshot.position;
-            parts.position.0 = snapshot.position;
-            parts.velocity.0 = snapshot.velocity;
-            parts.look.yaw = snapshot.look.x;
-            parts.look.pitch = snapshot.look.y;
-
-            if let Some((stored_state, stored_input)) = local_state {
-                *parts.state = stored_state.clone();
-                *parts.input = stored_input.clone();
-            } else {
-                *parts.state = CharacterControllerState::default();
-                *parts.input = AccumulatedInput::default();
-            }
-
-            snapshot.state.apply_to_controller_state(&mut parts.state);
-            owner
+        let mut players = self.set.p1();
+        let Ok(mut parts) = players.get_mut(entity) else {
+            return;
         };
 
-        if let Some(netahoy_world) = self.netahoy_world.as_deref_mut() {
-            netahoy_world.restore_world(restored_owner, snapshot.last_processed_sequence);
+        parts.transform.translation = snapshot.position;
+        parts.position.0 = snapshot.position;
+        parts.velocity.0 = snapshot.velocity;
+        parts.look.yaw = snapshot.look.x;
+        parts.look.pitch = snapshot.look.y;
+
+        if let Some((stored_state, stored_input, stored_player_state)) = local_state {
+            *parts.state = stored_state.clone();
+            *parts.input = stored_input.clone();
+            *parts.player_state = *stored_player_state;
+        } else {
+            *parts.state = CharacterControllerState::default();
+            *parts.input = AccumulatedInput::default();
+            *parts.player_state = NetAhoyPlayerState::default();
         }
+
+        snapshot.state.apply_to_controller_state(&mut parts.state);
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {
