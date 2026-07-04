@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use crate::{
+    demo::DemoPlayback,
     math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
@@ -393,7 +394,20 @@ fn announce_join(mut commands: Commands) {
     commands.client_trigger(JoinRequest);
 }
 
-fn set_local_player_id(accepted: On<JoinAccepted>, mut local: ResMut<LocalPlayerId>) {
+fn set_local_player_id(
+    accepted: On<JoinAccepted>,
+    mut local: ResMut<LocalPlayerId>,
+    playback: Option<ResMut<DemoPlayback>>,
+) {
+    // In demo playback the recorded JoinAccepted replays, but nobody is local —
+    // remember whose demo this is (spectator cam target) and keep LocalPlayerId
+    // unset so no prediction path ever engages.
+    if let Some(mut playback) = playback {
+        playback.recorded_player = Some(accepted.player_id);
+        info!("demo recorded by player {}", accepted.player_id);
+        return;
+    }
+
     local.0 = Some(accepted.player_id);
     info!("joined as player {}", accepted.player_id);
 }
@@ -417,6 +431,7 @@ fn mark_server_truth_ghost(
 fn tag_remote_players(
     mut commands: Commands,
     local: Res<LocalPlayerId>,
+    playback: Option<Res<DemoPlayback>>,
     players: Query<
         (Entity, &PlayerId),
         (
@@ -426,12 +441,18 @@ fn tag_remote_players(
         ),
     >,
 ) {
-    let Some(local_id) = local.0 else {
-        return;
+    // In demo playback nobody is local: every player interpolates.
+    let local_id = if playback.is_some() {
+        None
+    } else {
+        let Some(local_id) = local.0 else {
+            return;
+        };
+        Some(local_id)
     };
 
     for (entity, player_id) in &players {
-        if player_id.0 != local_id {
+        if Some(player_id.0) != local_id {
             commands
                 .entity(entity)
                 .insert(RemoteInterpolationBuffer::default());

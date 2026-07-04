@@ -11,6 +11,7 @@ type_complexity = "allow"
 
 [dependencies]
 aeronet = "0.20.0"
+aeronet_replicon = { version = "0.20.0", default-features = false, features = ["client"] }
 avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "parallel"] }
 bitflags = { version = "2", features = ["serde"] }
 bevy = { version = "0.18.1", default-features = false, features = ["async_executor", "bevy_log", "bevy_state", "multi_threaded", "serialize"] }

@@ -33,6 +33,7 @@ fn main() -> AppExit {
     let poor_network = poor_network_from_args();
     let time_scale = debug_time_scale_from_args();
     let remote_ghost_debug = remote_ghost_debug_from_args();
+    let demo = DemoArgs::from_args();
 
     let mut app = App::new();
     app.insert_resource(ClientLook::default())
@@ -63,9 +64,34 @@ fn main() -> AppExit {
         AhoyPlugins::new(NetAhoyKccSchedule),
         ExampleSharedPlugin,
         ClientNetAhoyPlugin,
-        ClientPlugin,
+        ClientPlugin { demo },
     ))
     .run()
+}
+
+#[derive(Default)]
+struct DemoArgs {
+    record: Option<std::path::PathBuf>,
+    play: Option<std::path::PathBuf>,
+}
+
+impl DemoArgs {
+    fn from_args() -> Self {
+        Self {
+            record: path_arg("--record"),
+            play: path_arg("--play"),
+        }
+    }
+}
+
+fn path_arg(flag: &str) -> Option<std::path::PathBuf> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            return args.next().map(Into::into);
+        }
+    }
+    None
 }
 
 fn remote_ghost_debug_from_args() -> RemoteGhostDebug {
@@ -111,7 +137,9 @@ type CameraRigFilter = (
     Without<LocalPresentationPlayer>,
 );
 
-struct ClientPlugin;
+struct ClientPlugin {
+    demo: DemoArgs,
+}
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
@@ -119,15 +147,26 @@ impl Plugin for ClientPlugin {
         rockets::add_client_rockets(app);
         vehicle::add_client_vehicles(app);
 
-        app.add_plugins((WebSocketClientPlugin, AeronetRepliconClientPlugin))
-            .add_observer(use_replicon_for_session)
-            .add_observer(set_window_title_on_join)
+        if let Some(path) = &self.demo.play {
+            // Demo playback IS the network backend; no websocket, no session.
+            app.add_plugins(DemoPlaybackPlugin { path: path.clone() })
+                .add_systems(
+                    Update,
+                    demo_playback_controls.run_if(resource_exists::<DemoPlayback>),
+                );
+        } else {
+            app.add_plugins((WebSocketClientPlugin, AeronetRepliconClientPlugin))
+                .add_observer(use_replicon_for_session)
+                .add_systems(Startup, setup_client);
+            if let Some(path) = &self.demo.record {
+                app.add_plugins(DemoRecordPlugin { path: path.clone() });
+            }
+        }
+
+        app.add_observer(set_window_title_on_join)
             .add_observer(log_connected)
             .add_observer(log_disconnected)
-            .add_systems(
-                Startup,
-                (setup_client, setup_scene, setup_hud),
-            )
+            .add_systems(Startup, (setup_scene, setup_hud))
             .add_systems(
                 Update,
                 (
@@ -643,24 +682,37 @@ fn gather_client_input(
 
 fn update_camera_from_local_presentation(
     look: Res<ClientLook>,
+    playback: Option<Res<DemoPlayback>>,
     driven: Query<&Transform, (With<vehicle::LocalVehicleSim>, Without<Camera3d>)>,
     presentations: Query<&Transform, (With<LocalPresentationPlayer>, Without<Camera3d>)>,
     server_players: Query<&AhoySnapshot, With<ServerTruthGhost>>,
+    remote_visuals: Query<(&RemotePlayerVisual, &Transform), Without<Camera3d>>,
     mut camera: Single<&mut Transform, CameraRigFilter>,
 ) {
     // While driving, orbit the locally simulated buggy (there is no capsule).
     let target = driven
         .single()
+        .ok()
         .map(|transform| transform.translation + Vec3::Y * 0.9)
-        .or_else(|_| {
+        .or_else(|| {
             presentations
                 .single()
+                .ok()
                 .map(|transform| transform.translation + Vec3::Y * 0.6)
         })
-        .or_else(|_| {
+        .or_else(|| {
             server_players
                 .single()
+                .ok()
                 .map(|snapshot| snapshot.position + Vec3::Y * 0.6)
+        })
+        .or_else(|| {
+            // Demo playback: chase the recorded player's interpolated visual.
+            let recorded = playback.as_ref()?.recorded_player?;
+            remote_visuals
+                .iter()
+                .find(|(visual, _)| visual.player_id.0 == recorded)
+                .map(|(_, transform)| transform.translation + Vec3::Y * 0.6)
         })
         .unwrap_or(SPAWN_POINT);
     let rotation = Quat::from_euler(EulerRot::YXZ, look.yaw, look.pitch, 0.0);
@@ -689,14 +741,40 @@ fn update_speed_text(
     }
 }
 
+fn demo_playback_controls(keys: Res<ButtonInput<KeyCode>>, mut playback: ResMut<DemoPlayback>) {
+    if keys.just_pressed(KeyCode::Space) {
+        playback.speed = if playback.speed == 0.0 { 1.0 } else { 0.0 };
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        playback.speed = (playback.speed * 2.0).clamp(0.25, 8.0);
+    }
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        playback.speed = (playback.speed * 0.5).clamp(0.25, 8.0);
+    }
+}
+
 fn update_status_text(
     local: Res<LocalPlayerId>,
     state: Res<State<ClientState>>,
     time_scale: Res<DebugTimeScale>,
     debug_ghosts: Res<RemoteGhostDebug>,
+    playback: Option<Res<DemoPlayback>>,
     mut text: Single<&mut Text, With<StatusText>>,
 ) {
-    let mut status = format!("{} - {:?}", local.label(), state.get());
+    let mut status = if let Some(playback) = &playback {
+        format!(
+            "demo {} - {:.1}s / {:.1}s - {}x",
+            playback
+                .recorded_player
+                .map(|id| format!("player {id}"))
+                .unwrap_or_else(|| "?".to_string()),
+            playback.clock.min(playback.duration()),
+            playback.duration(),
+            playback.speed,
+        )
+    } else {
+        format!("{} - {:?}", local.label(), state.get())
+    };
     if time_scale.is_scaled() {
         status.push_str(&format!(" - slowmo {:.2}x", time_scale.factor));
     }

@@ -1,5 +1,6 @@
 pub mod client;
 pub mod debug;
+pub mod demo;
 pub mod math;
 pub mod step;
 pub mod protocol;
@@ -8,6 +9,7 @@ pub mod world;
 
 pub use client::*;
 pub use debug::*;
+pub use demo::*;
 pub use math::*;
 pub use step::*;
 pub use protocol::*;
