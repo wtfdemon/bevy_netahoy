@@ -192,9 +192,7 @@ fn publish_authoritative_player_snapshots(
         &LinearVelocity,
         &CharacterLook,
         &CharacterControllerState,
-        // Optional: scripted NPC players have no POD; they publish a default
-        // weapon block, which nothing reads for them.
-        Option<&NetAhoyPlayerState>,
+        &NetAhoyPlayerState,
         &mut AhoySnapshot,
     )>,
 ) {
@@ -208,8 +206,8 @@ fn publish_authoritative_player_snapshots(
         snapshot.velocity = **velocity;
         snapshot.look = Vec2::new(look.yaw, look.pitch);
         snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
-        snapshot.weapon = player_state.map(|state| state.weapon).unwrap_or_default();
-        snapshot.rockets = player_state.map(|state| state.rockets).unwrap_or_default();
+        snapshot.weapon = player_state.weapon;
+        snapshot.rockets = player_state.rockets;
     }
 }
 

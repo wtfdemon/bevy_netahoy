@@ -11,7 +11,7 @@ use crate::{
     math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
-    player::NetAhoyPlayerState,
+    player::{NetAhoyPlayerEvents, NetAhoyPlayerState},
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
@@ -50,6 +50,10 @@ impl Plugin for ClientNetAhoyPlugin {
             // received snapshots — the rocket sweep samples it during
             // prediction and replay so direct hits predict.
             .init_resource::<LagCompensationHistory>()
+            // The predicted outbox: what the local step fired/blasted. The
+            // game drains it for instant fire/explosion presentation,
+            // deduping by RocketId (replay pushes duplicates).
+            .init_resource::<NetAhoyPlayerEvents>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(

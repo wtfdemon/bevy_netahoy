@@ -61,13 +61,12 @@ pub struct NetAhoyStepper<'w, 's> {
         ),
     >,
     fixed_time: Res<'w, Time<Fixed>>,
-    // Server-only outbox for what step_player_state fires/blasts; None on the client,
-    // where prediction and replay would push duplicates.
-    player_events: Option<ResMut<'w, NetAhoyPlayerEvents>>,
-    // Pose history for the rocket-vs-player sweep. Both peers keep one (the
-    // server records live poses, the client mirrors received snapshots); a
-    // bare-App test without it just skips direct hits.
-    poses: Option<Res<'w, LagCompensationHistory>>,
+    // The outbox for what step_player_state fires/blasts, on both peers. The
+    // server broadcast-drains it; the client drains it for predicted visuals.
+    player_events: ResMut<'w, NetAhoyPlayerEvents>,
+    // Pose history for the rocket sweep and player push. Both peers keep one:
+    // the server records live poses, the client mirrors received snapshots.
+    poses: Res<'w, LagCompensationHistory>,
 }
 
 impl NetAhoyStepper<'_, '_> {
@@ -128,7 +127,7 @@ impl NetAhoyStepper<'_, '_> {
         let spatial = self.set.p2();
         step_player_state(
             &mut player_state,
-            self.player_events.as_deref_mut(),
+            &mut self.player_events,
             owner,
             command,
             previous_sequence,
@@ -136,7 +135,7 @@ impl NetAhoyStepper<'_, '_> {
             position,
             look,
             &spatial,
-            self.poses.as_deref(),
+            &self.poses,
             &mut velocity,
         );
 

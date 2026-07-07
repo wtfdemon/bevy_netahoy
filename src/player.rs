@@ -44,7 +44,8 @@ pub const EQUIP_BAZOOKA: AhoyButtons = AhoyButtons::from_bits_retain(1 << 18);
 
 /// Rocket tuning. Plain consts so client and server share them with no resource.
 const EYE_HEIGHT: f32 = 0.6;
-const SPEED: f32 = 42.0;
+/// Public so presentation can animate flight (`hit_distance / ROCKET_SPEED`).
+pub const ROCKET_SPEED: f32 = 42.0;
 const LIFETIME_SECONDS: f32 = 1.35;
 /// Public so game code can judge "was I in the blast?" (e.g. hit reactions).
 pub const SPLASH_RADIUS: f32 = 4.0;
@@ -54,7 +55,7 @@ const IMPULSE_SPEED: f32 = 42.0;
 /// treat it as momentum for a body of this mass and divide by the real mass).
 /// Public so game code applying blasts to its own bodies matches the server.
 pub const BLAST_REFERENCE_MASS: f32 = 40.0;
-const MAX_DISTANCE: f32 = SPEED * LIFETIME_SECONDS;
+const MAX_DISTANCE: f32 = ROCKET_SPEED * LIFETIME_SECONDS;
 /// In-flight cap, deep headroom: the 4-tick cooldown against the 27-tick
 /// lifetime bounds legitimate in-flight rockets to 7. Overflow means an
 /// abusive stream and the fire is declined — both peers run the same step,
@@ -73,22 +74,26 @@ pub const ROCKET_AMMO_MAX: u16 = 20;
 /// One rocket regenerates per second, so the movement demo never bricks dry.
 pub const AMMO_REGEN_TICKS: u16 = FIXED_TIMESTEP_HZ as u16;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RocketId {
     pub owner: PlayerId,
     pub fired_sequence: u32,
 }
 
-/// Server event: a rocket was fired. Remote clients can use this for visuals.
-#[derive(Event, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// A rocket was fired: broadcast to remote clients as a server event, drained
+/// locally from [`NetAhoyPlayerEvents`] for predicted visuals. Carries the
+/// full flight (`hit_distance / ROCKET_SPEED` = travel seconds), so a visual
+/// can fly and land without ever reading rocket state again.
+#[derive(Event, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RocketFired {
     pub id: RocketId,
     pub start: Vec3,
     pub dir: Vec3,
+    pub hit_distance: f32,
 }
 
 /// Server event: a rocket detonated. The same value is used by server splash.
-#[derive(Event, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Event, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RocketHit {
     pub id: RocketId,
     pub point: Vec3,
@@ -132,7 +137,7 @@ impl Rocket {
         // distance / speed = seconds, * HZ = ticks. Rounds to 0 point-blank, so a
         // shot into a wall detonates the same tick it's fired (the detonation pass
         // in step_player_state runs right after the rocket is pushed).
-        let fuse_ticks = (hit_distance / SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
+        let fuse_ticks = (hit_distance / ROCKET_SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
         if fuse_ticks == 0 {
             println!(
                 "Rocket fired at zero fuse: owner={:?} sequence={} pos={:?} look={:?} dist={}",
@@ -162,6 +167,7 @@ impl Rocket {
             id: self.id(),
             start: self.start,
             dir: self.dir,
+            hit_distance: self.hit_distance,
         }
     }
 
@@ -293,10 +299,15 @@ pub struct NetAhoyPlayerState {
     pub weapon: WeaponState,
 }
 
-/// Server-only outbox: what [`step_player_state`] fired and blasted, drained into
-/// broadcasts by [`process_rocket_events`]. The client never creates it —
-/// prediction and replay would push duplicates, and client visuals come from
-/// the server events (or the game's own raycast).
+/// The outbox: what [`step_player_state`] fired and blasted, on both peers.
+/// The server drains it into broadcasts ([`process_rocket_events`]); the
+/// client drains it for predicted presentation — a blast carries the exact
+/// (possibly direct-hit-truncated) point and victim, which no snapshot can,
+/// because a detonating rocket is removed the same command it blasts.
+///
+/// Replay pushes events again for re-simulated commands, so a client consumer
+/// must dedupe by [`RocketId`] — "skip a fire whose visual exists, skip a
+/// blast whose visual doesn't" covers it. The server never replays.
 #[derive(Resource, Default)]
 pub struct NetAhoyPlayerEvents {
     pub fired: Vec<RocketFired>,
@@ -309,11 +320,10 @@ pub struct NetAhoyPlayerEvents {
 ///
 /// `previous_sequence` is the last command stepped before this one; the sweep
 /// covers the whole gap so rockets can't tunnel through victims across lost
-/// commands. `poses` is the pose history both peers keep — `None` skips
-/// direct hits (rockets then only blast on their baked world impact).
+/// commands. `poses` is the pose history both peers keep.
 pub fn step_player_state(
     state: &mut NetAhoyPlayerState,
-    events: Option<&mut NetAhoyPlayerEvents>,
+    events: &mut NetAhoyPlayerEvents,
     owner: PlayerId,
     command: &AhoyUserCmd,
     previous_sequence: u32,
@@ -321,11 +331,9 @@ pub fn step_player_state(
     position: Vec3,
     look: Vec2,
     spatial: &SpatialQuery,
-    poses: Option<&LagCompensationHistory>,
+    poses: &LagCompensationHistory,
     velocity: &mut Vec3,
 ) {
-    let mut events = events;
-
     // Weapon timers tick once per command, before the fire gate, so a 16-tick
     // cooldown yields exactly a 16-command refire period.
     let weapon = &mut state.weapon;
@@ -353,33 +361,31 @@ pub fn step_player_state(
     // both peers compute the identical nudge and it predicts rollback-free.
     // Ids are sorted before summing: f32 addition isn't associative and the
     // pose map's iteration order differs between peers.
-    if let Some(poses) = poses {
-        let seen_time = RemoteRenderTime::new(command.seen_server_tick, command.seen_alpha);
-        let mut others: Vec<PlayerId> = poses.poses.keys().copied().collect();
-        others.sort_by_key(|player_id| player_id.0);
-        for other in others {
-            if other == owner {
-                continue;
-            }
-            let Some(pose) = poses.pose_at_time(other, seen_time) else {
-                continue;
-            };
-            let delta = position - pose.position;
-            if delta.y.abs() >= PLAYER_CAPSULE_HALF_HEIGHT * 2.0 {
-                continue;
-            }
-            let flat = Vec2::new(delta.x, delta.z);
-            let distance = flat.length();
-            let touch = PLAYER_CAPSULE_RADIUS * 2.0;
-            if distance >= touch {
-                continue;
-            }
-            // Dead-center overlap (spawn stacks) still needs a deterministic
-            // way out; +X is as good as any and identical on both peers.
-            let direction = if distance > 0.001 { flat / distance } else { Vec2::X };
-            let strength = PLAYER_PUSH_SPEED * (1.0 - distance / touch);
-            *velocity += Vec3::new(direction.x, 0.0, direction.y) * strength;
+    let seen_time = RemoteRenderTime::new(command.seen_server_tick, command.seen_alpha);
+    let mut others: Vec<PlayerId> = poses.poses.keys().copied().collect();
+    others.sort_by_key(|player_id| player_id.0);
+    for other in others {
+        if other == owner {
+            continue;
         }
+        let Some(pose) = poses.pose_at_time(other, seen_time) else {
+            continue;
+        };
+        let delta = position - pose.position;
+        if delta.y.abs() >= PLAYER_CAPSULE_HALF_HEIGHT * 2.0 {
+            continue;
+        }
+        let flat = Vec2::new(delta.x, delta.z);
+        let distance = flat.length();
+        let touch = PLAYER_CAPSULE_RADIUS * 2.0;
+        if distance >= touch {
+            continue;
+        }
+        // Dead-center overlap (spawn stacks) still needs a deterministic
+        // way out; +X is as good as any and identical on both peers.
+        let direction = if distance > 0.001 { flat / distance } else { Vec2::X };
+        let strength = PLAYER_PUSH_SPEED * (1.0 - distance / touch);
+        *velocity += Vec3::new(direction.x, 0.0, direction.y) * strength;
     }
 
     let firing = command.buttons.contains(ROCKET_FIRE);
@@ -396,9 +402,7 @@ pub fn step_player_state(
         state.weapon.shots_fired = state.weapon.shots_fired.wrapping_add(1);
         let rocket = Rocket::fire(owner, command.sequence, position, look, spatial);
         state.rockets.push(rocket);
-        if let Some(events) = events.as_deref_mut() {
-            events.fired.push(rocket.fired_event());
-        }
+        events.fired.push(rocket.fired_event());
     }
 
     // Sweep each rocket's flight segment against the other players' hitboxes
@@ -407,40 +411,37 @@ pub fn step_player_state(
     // history, so a direct hit (and the early blast it causes) predicts. A
     // direct hit shortens the rocket to the impact: the fuse now lands on this
     // command and the detonation pass below blasts it at the struck point.
-    if let Some(poses) = poses {
-        let seen_time = RemoteRenderTime::new(command.seen_server_tick, command.seen_alpha);
-        for index in 0..state.rockets.count {
-            let rocket = &mut state.rockets.rockets[index];
-            // Cover everything since the last stepped command (lost commands
-            // leave gaps), but never before the rocket existed. A rocket fired
-            // this command has a degenerate segment and skips — its first tick
-            // of flight is swept by the next command.
-            let from_sequence = if sequence_is_newer(previous_sequence, rocket.fired_sequence) {
-                previous_sequence
-            } else {
-                rocket.fired_sequence
-            };
-            let from = rocket.position_at(from_sequence);
-            let to = rocket.position_at(command.sequence);
-            let segment = to - from;
-            let length = segment.length();
-            if length <= f32::EPSILON {
-                continue;
-            }
+    for index in 0..state.rockets.count {
+        let rocket = &mut state.rockets.rockets[index];
+        // Cover everything since the last stepped command (lost commands
+        // leave gaps), but never before the rocket existed. A rocket fired
+        // this command has a degenerate segment and skips — its first tick
+        // of flight is swept by the next command.
+        let from_sequence = if sequence_is_newer(previous_sequence, rocket.fired_sequence) {
+            previous_sequence
+        } else {
+            rocket.fired_sequence
+        };
+        let from = rocket.position_at(from_sequence);
+        let to = rocket.position_at(command.sequence);
+        let segment = to - from;
+        let length = segment.length();
+        if length <= f32::EPSILON {
+            continue;
+        }
 
-            if let Some(hit) = poses.raycast_hitboxes_at_time(LagCompensatedCast {
-                server_time: seen_time,
-                origin: from,
-                direction: segment / length,
-                max_distance: length,
-                radius: PLAYER_CAPSULE_RADIUS,
-                half_height: PLAYER_CAPSULE_HALF_HEIGHT,
-                ignored_player: Some(owner),
-            }) {
-                rocket.hit_distance = from.distance(rocket.start) + hit.distance;
-                rocket.fuse_ticks = command.sequence.wrapping_sub(rocket.fired_sequence);
-                rocket.direct_hit = Some(hit.player_id);
-            }
+        if let Some(hit) = poses.raycast_hitboxes_at_time(LagCompensatedCast {
+            server_time: seen_time,
+            origin: from,
+            direction: segment / length,
+            max_distance: length,
+            radius: PLAYER_CAPSULE_RADIUS,
+            half_height: PLAYER_CAPSULE_HALF_HEIGHT,
+            ignored_player: Some(owner),
+        }) {
+            rocket.hit_distance = from.distance(rocket.start) + hit.distance;
+            rocket.fuse_ticks = command.sequence.wrapping_sub(rocket.fired_sequence);
+            rocket.direct_hit = Some(hit.player_id);
         }
     }
 
@@ -458,14 +459,13 @@ pub fn step_player_state(
             continue;
         }
 
-        *velocity += rocket_impulse(rocket.detonation_point(), position);
-        if let Some(events) = events.as_deref_mut() {
-            events.hit.push(RocketHit {
-                id: rocket.id(),
-                point: rocket.detonation_point(),
-                direct_hit: rocket.direct_hit,
-            });
-        }
+        let hit = RocketHit {
+            id: rocket.id(),
+            point: rocket.detonation_point(),
+            direct_hit: rocket.direct_hit,
+        };
+        *velocity += rocket_impulse(hit.point, position);
+        events.hit.push(hit);
 
         state.rockets.remove(index);
         // No index bump: re-examine the rocket just swapped into this slot.

@@ -123,6 +123,7 @@ fn spawn_flying_target(commands: &mut Commands) {
         PlayerId(FLYING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
         ServerCommandBuffer::default(),
+        NetAhoyPlayerState::default(),
         CharacterLook::default(),
         CharacterControllerState::default(),
         Position::new(position),
@@ -132,9 +133,8 @@ fn spawn_flying_target(commands: &mut Commands) {
     ));
 }
 
-/// Ground-level bot that paces back and forth — a rocket target you can stand
-/// next to (or on). Unlike the flying target it gets a real collider, so it is
-/// solid on the server and the client attaches its remote capsule as usual.
+/// Ground-level bot that paces back and forth — a rocket target you can walk
+/// into (the shared step pushes you apart) and blast point-blank.
 fn spawn_walking_target(commands: &mut Commands) {
     let position = walking_target_position(0);
     commands.spawn((
@@ -144,15 +144,18 @@ fn spawn_walking_target(commands: &mut Commands) {
         PlayerId(WALKING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
         ServerCommandBuffer::default(),
+        NetAhoyPlayerState::default(),
         CharacterLook::default(),
         CharacterControllerState::default(),
-        RigidBody::Static,
-        Collider::cylinder(0.45, 1.5),
-        player_collision_layers(),
-        Position::new(position),
-        Rotation::IDENTITY,
-        LinearVelocity::ZERO,
-        Transform::from_translation(position),
+        (
+            RigidBody::Static,
+            Collider::cylinder(0.45, 1.5),
+            player_collision_layers(),
+            Position::new(position),
+            Rotation::IDENTITY,
+            LinearVelocity::ZERO,
+            Transform::from_translation(position),
+        ),
     ));
 }
 
