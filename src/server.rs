@@ -12,7 +12,7 @@ use crate::{
     math::{ray_hitbox_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
-    player::{process_rocket_events, NetAhoyPlayerEvents},
+    player::{process_rocket_events, NetAhoyPlayerEvents, NetAhoyPlayerState},
 };
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
@@ -266,10 +266,15 @@ fn publish_authoritative_player_snapshots(
         &LinearVelocity,
         &CharacterLook,
         &CharacterControllerState,
+        // Optional: scripted NPC players have no POD; they publish a default
+        // weapon block, which nothing reads for them.
+        Option<&NetAhoyPlayerState>,
         &mut AhoySnapshot,
     )>,
 ) {
-    for (command_buffer, position, velocity, look, controller_state, mut snapshot) in &mut players {
+    for (command_buffer, position, velocity, look, controller_state, player_state, mut snapshot) in
+        &mut players
+    {
         snapshot.server_tick = tick.0;
         snapshot.last_processed_sequence = command_buffer.last_processed_sequence;
         snapshot.last_processed_buttons = command_buffer.last_buttons;
@@ -277,6 +282,7 @@ fn publish_authoritative_player_snapshots(
         snapshot.velocity = **velocity;
         snapshot.look = Vec2::new(look.yaw, look.pitch);
         snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
+        snapshot.weapon = player_state.map(|state| state.weapon).unwrap_or_default();
     }
 }
 

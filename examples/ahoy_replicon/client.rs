@@ -673,6 +673,8 @@ fn gather_client_input(
     ); */
     buttons.set(AhoyButtons::CLIMBDOWN, keys.pressed(KeyCode::KeyZ));
     buttons.set(AhoyButtons::SWIM_UP, keys.pressed(KeyCode::Space));
+    // The demo has no weapon switching; always carry the launcher.
+    buttons.set(EQUIP_BAZOOKA, true);
     buttons.set(
         ROCKET_FIRE,
         mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),

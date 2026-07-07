@@ -640,7 +640,10 @@ fn reconcile_local_prediction(
         let xz_error = delta.xz().length();
         let y_error = delta.y.abs();
         let total_error = delta.length();
-        let state_mismatch = snapshot.state != ack_frame.state;
+        // Weapon state counts as a mismatch too: a server-declined fire must
+        // force the rewind path even when the position error is zero.
+        let state_mismatch = snapshot.state != ack_frame.state
+            || snapshot.weapon != ack_frame.player_state.weapon;
         let ignore_y = snapshot.state.grounded && y_error <= IGNORE_GROUNDED_Y_ERROR;
         (total_error, state_mismatch, xz_error, y_error, ignore_y)
     });

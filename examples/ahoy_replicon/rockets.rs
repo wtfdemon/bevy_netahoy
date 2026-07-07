@@ -26,27 +26,34 @@ struct RocketMarker {
     timer: Timer,
 }
 
-/// Spawns the explosion marker, one per shot. Client-only and never replayed, so it
-/// fires once, redoing the raycast off the predicted player to match the real impulse.
+/// Spawns the fire visuals, exactly once per *accepted* shot. Edge-detecting
+/// the raw fire button would flash on dry fire and cooldown-declined clicks;
+/// instead this watermarks `weapon.shots_fired` from the predicted POD — the
+/// counter only advances when the shared step accepts a fire, and after a
+/// rewind that revokes a shot the watermark resyncs downward without replaying
+/// effects. (You can't unplay a flash the server later declines; that one
+/// mispredicted visual is the accepted cost of instant feedback.)
 fn spawn_rocket_visual(
-    input: Res<ClientInput>,
-    mut fired: Local<bool>,
-    player: Query<(&Transform, &CharacterLook), With<ClientPredictionKcc>>,
+    mut last_shots_fired: Local<Option<u16>>,
+    player: Query<(&Transform, &CharacterLook, &NetAhoyPlayerState), With<ClientPredictionKcc>>,
     spatial: SpatialQuery,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let pressed = input.buttons.contains(ROCKET_FIRE);
-    let edge = pressed && !*fired;
-    *fired = pressed;
-    if !edge {
-        return;
-    }
-
-    let Ok((transform, look)) = player.single() else {
+    let Ok((transform, look, state)) = player.single() else {
         return;
     };
+
+    let shots = state.weapon.shots_fired;
+    let Some(last) = last_shots_fired.replace(shots) else {
+        return;
+    };
+    // Wrapping "did it advance": a post-rewind decrease resyncs silently.
+    let advanced = shots.wrapping_sub(last);
+    if advanced == 0 || advanced > u16::MAX / 2 {
+        return;
+    }
     let look = Vec2::new(look.yaw, look.pitch);
     // Trace the same rocket the predictor will fire, so the marker lands where the
     // real blast goes off. It shows immediately even though the blast has travel

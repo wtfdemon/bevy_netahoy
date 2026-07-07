@@ -181,6 +181,10 @@ impl NetAhoyStepper<'_, '_> {
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
+        // The net subset: server truth for weapon state stomps whatever the
+        // frame (or default) held. The rockets stay from the frame — they're
+        // re-derivable from the command stream, so they never ride the wire.
+        parts.player_state.weapon = snapshot.weapon;
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {
@@ -234,11 +238,14 @@ fn apply_usercmd(
     input.swim_up = command.buttons.contains(AhoyButtons::SWIM_UP);
     input.crouched = command.buttons.contains(AhoyButtons::CROUCH);
 
-    // Bits set this command but not last = rising edges.
-    let pressed = command.buttons - previous_buttons;
-    if pressed.contains(AhoyButtons::JUMP) {
+    // Ahoy's normal input observers fire held Jump every frame. Preserve that
+    // here so holding Space can auto-bhop through usercmds.
+    if command.buttons.contains(AhoyButtons::JUMP) {
         input.jumped = Some(Stopwatch::new());
     }
+
+    // Bits set this command but not last = rising edges.
+    let pressed = command.buttons - previous_buttons;
     if pressed.contains(AhoyButtons::TAC) {
         input.tac = Some(Stopwatch::new());
     }

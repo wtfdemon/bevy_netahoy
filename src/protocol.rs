@@ -11,7 +11,7 @@ use bevy_replicon::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::player::{RocketFired, RocketHit};
+use crate::player::{RocketFired, RocketHit, WeaponState};
 
 pub const DEFAULT_PORT: u16 = 5000;
 pub const FIXED_TIMESTEP_HZ: f64 = 20.0;
@@ -127,6 +127,9 @@ pub struct AhoySnapshot {
     pub velocity: Vec3,
     pub look: Vec2,
     pub state: NetAhoyMoveState,
+    /// The POD's server-corrected subset; the rest of the POD never rides the
+    /// wire because the client re-derives it from its own command stream.
+    pub weapon: WeaponState,
 }
 
 /// [`AhoySnapshot`]'s sibling for plain rigid bodies (vehicles, props): the

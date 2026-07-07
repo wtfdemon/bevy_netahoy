@@ -31,6 +31,10 @@ pub const PLAYER_COLLISION_LAYER: LayerMask = LayerMask(1 << 1);
 
 /// "Fire rocket" bit, in the high range the library leaves for games.
 pub const ROCKET_FIRE: AhoyButtons = AhoyButtons::from_bits_retain(1 << 16);
+/// Weapon-select bits. Held-state selects (not a toggle edge), so a dropped
+/// command can't strand a switch — the next command repeats the intent.
+pub const EQUIP_FISTS: AhoyButtons = AhoyButtons::from_bits_retain(1 << 17);
+pub const EQUIP_BAZOOKA: AhoyButtons = AhoyButtons::from_bits_retain(1 << 18);
 
 /// Rocket tuning. Plain consts so client and server share them with no resource.
 const EYE_HEIGHT: f32 = 0.6;
@@ -45,11 +49,16 @@ const IMPULSE_SPEED: f32 = 42.0;
 /// Public so game code applying blasts to its own bodies matches the server.
 pub const BLAST_REFERENCE_MASS: f32 = 40.0;
 const MAX_DISTANCE: f32 = SPEED * LIFETIME_SECONDS;
-/// In-flight cap. Physics bounds the legitimate count: 1.35 s lifetime at 20 Hz
-/// is 27 ticks, and edge-triggered fire lands at most every other tick, so ≤14
-/// rockets can coexist. Overflow means an abusive stream and the fire is
-/// declined — both peers run the same step, so the decline predicts cleanly.
+/// In-flight cap, deep headroom: the 16-tick cooldown against the 27-tick
+/// lifetime bounds legitimate in-flight rockets to 2. Overflow means an
+/// abusive stream and the fire is declined — both peers run the same step,
+/// so the decline predicts cleanly.
 const MAX_ROCKETS: usize = 16;
+/// Refire delay: 16 ticks = 0.8 s at 20 Hz, the classic rocket cadence.
+pub const ROCKET_COOLDOWN_TICKS: u16 = 4;
+pub const ROCKET_AMMO_MAX: u16 = 20;
+/// One rocket regenerates per second, so the movement demo never bricks dry.
+pub const AMMO_REGEN_TICKS: u16 = FIXED_TIMESTEP_HZ as u16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RocketId {
@@ -103,6 +112,16 @@ impl Rocket {
         // shot into a wall detonates the same tick it's fired (the detonation pass
         // in step_player_state runs right after the rocket is pushed).
         let fuse_ticks = (hit_distance / SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
+        if fuse_ticks == 0 {
+            println!(
+                "Rocket fired at zero fuse: owner={:?} sequence={} pos={:?} look={:?} dist={}",
+                owner,
+                fired_sequence,
+                position,
+                look,
+                hit_distance
+            );
+        }
         Self { owner, fired_sequence, start, dir, hit_distance, fuse_ticks }
     }
 
@@ -137,6 +156,47 @@ impl Rocket {
     }
 }
 
+/// What the player is holding. Selected via the `EQUIP_*` buttons inside the
+/// shared step, so switches predict, replay, and replicate like any other
+/// command-driven state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WeaponSlot {
+    #[default]
+    Fists,
+    Bazooka,
+}
+
+/// The replicated weapon subset of the POD — the part the client cannot
+/// re-derive from its own commands (the server may decline a fire the client
+/// predicted), so it rides [`crate::protocol::AhoySnapshot`] and gets stomped
+/// over the frame's prediction on every restore. One flat `Copy` struct so
+/// "apply server truth" stays a single assignment no matter how many fields
+/// games add to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WeaponState {
+    pub equipped: WeaponSlot,
+    pub ammo: u16,
+    /// Ticks until the next fire is accepted; counts down once per command.
+    pub cooldown_ticks: u16,
+    /// Ticks accumulated toward the next ammo regen.
+    pub regen_ticks: u16,
+    /// Total accepted fires, wrapping. Not gameplay: the presentation layer
+    /// watermarks this to play fire effects exactly once across replays.
+    pub shots_fired: u16,
+}
+
+impl Default for WeaponState {
+    fn default() -> Self {
+        Self {
+            equipped: WeaponSlot::default(),
+            ammo: ROCKET_AMMO_MAX,
+            cooldown_ticks: 0,
+            regen_ticks: 0,
+            shots_fired: 0,
+        }
+    }
+}
+
 /// The per-player game POD. Lives as a component on the KCC entity on both
 /// peers; [`crate::step::NetAhoyStepper`] steps it, copies it into every
 /// prediction frame, and restores it whole on rewind. C-style on purpose:
@@ -145,6 +205,7 @@ impl Rocket {
 pub struct NetAhoyPlayerState {
     rockets: [Rocket; MAX_ROCKETS],
     rocket_count: usize,
+    pub weapon: WeaponState,
 }
 
 impl Default for NetAhoyPlayerState {
@@ -152,6 +213,7 @@ impl Default for NetAhoyPlayerState {
         Self {
             rockets: [Rocket::default(); MAX_ROCKETS],
             rocket_count: 0,
+            weapon: WeaponState::default(),
         }
     }
 }
@@ -187,9 +249,39 @@ pub fn step_player_state(
     velocity: &mut Vec3,
 ) {
     let mut events = events;
+
+    // Weapon timers tick once per command, before the fire gate, so a 16-tick
+    // cooldown yields exactly a 16-command refire period.
+    let weapon = &mut state.weapon;
+    if command.buttons.contains(EQUIP_FISTS) {
+        weapon.equipped = WeaponSlot::Fists;
+    }
+    if command.buttons.contains(EQUIP_BAZOOKA) {
+        weapon.equipped = WeaponSlot::Bazooka;
+    }
+    weapon.cooldown_ticks = weapon.cooldown_ticks.saturating_sub(1);
+    if weapon.ammo < ROCKET_AMMO_MAX {
+        weapon.regen_ticks += 1;
+        if weapon.regen_ticks == AMMO_REGEN_TICKS {
+            weapon.regen_ticks = 0;
+            weapon.ammo += 1;
+        }
+    } else {
+        weapon.regen_ticks = 0;
+    }
+
     let firing = command.buttons.contains(ROCKET_FIRE);
     let was_firing = previous_buttons.contains(ROCKET_FIRE);
-    if firing && !was_firing && state.rocket_count < MAX_ROCKETS {
+    if firing
+        && !was_firing
+        && state.weapon.equipped == WeaponSlot::Bazooka
+        && state.weapon.cooldown_ticks == 0
+        && state.weapon.ammo > 0
+        && state.rocket_count < MAX_ROCKETS
+    {
+        state.weapon.ammo -= 1;
+        state.weapon.cooldown_ticks = ROCKET_COOLDOWN_TICKS;
+        state.weapon.shots_fired = state.weapon.shots_fired.wrapping_add(1);
         let rocket = Rocket::fire(owner, command.sequence, position, look, spatial);
         state.rockets[state.rocket_count] = rocket;
         state.rocket_count += 1;
