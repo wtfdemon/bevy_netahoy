@@ -1,13 +1,15 @@
 //! Interpolation timing and capsule-cast math shared by client interpolation
 //! and server lag compensation.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use avian3d::prelude::{Collider, Position, Rotation};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{AhoySnapshot, NetAhoyMoveState, FIXED_TIMESTEP_HZ};
+use crate::protocol::{AhoySnapshot, NetAhoyMoveState, PlayerId, FIXED_TIMESTEP_HZ};
+
+pub const LAG_COMPENSATION_HISTORY_CAPACITY: usize = 128;
 
 pub const REMOTE_INTERPOLATION_DISCONTINUITY_TICKS: u64 = 20;
 pub const REMOTE_INTERPOLATION_TELEPORT_DISTANCE: f32 = 8.0;
@@ -197,6 +199,101 @@ pub fn ray_hitbox_distance(
         false,
     )?;
     Some(distance)
+}
+
+/// Per-player pose history on the server timeline. The server records every
+/// tick's poses (`record_lag_compensation_history`); the client mirrors it
+/// from received snapshots (`buffer_remote_snapshots`). Both peers sample it
+/// at a command's seen time, so rocket-vs-player sweeps in the shared step
+/// judge hits against the same poses and direct hits predict.
+#[derive(Resource, Debug)]
+pub struct LagCompensationHistory {
+    pub max_frames: usize,
+    pub poses: HashMap<PlayerId, VecDeque<RemoteSnapshotSample>>,
+}
+
+impl Default for LagCompensationHistory {
+    fn default() -> Self {
+        Self {
+            max_frames: LAG_COMPENSATION_HISTORY_CAPACITY,
+            poses: HashMap::new(),
+        }
+    }
+}
+
+impl LagCompensationHistory {
+    pub fn record(&mut self, player_id: PlayerId, sample: RemoteSnapshotSample) {
+        let samples = self
+            .poses
+            .entry(player_id)
+            .or_insert_with(|| VecDeque::with_capacity(self.max_frames));
+        if samples
+            .back()
+            .is_some_and(|last| last.server_tick == sample.server_tick)
+        {
+            *samples.back_mut().unwrap() = sample;
+            return;
+        }
+
+        if samples.len() == self.max_frames {
+            samples.pop_front();
+        }
+        samples.push_back(sample);
+    }
+
+    pub fn pose_at_time(
+        &self,
+        player_id: PlayerId,
+        server_time: RemoteRenderTime,
+    ) -> Option<RemoteSnapshotSample> {
+        sample_buffer_at(self.poses.get(&player_id)?, server_time)
+    }
+
+    /// Ray-test every player's hitbox (the movement cylinder) as it stood at
+    /// `server_time` — the timestamp the shooter's client sampled its screen at.
+    pub fn raycast_hitboxes_at_time(&self, cast: LagCompensatedCast) -> Option<LagCompensatedHit> {
+        let direction = cast.direction.try_normalize()?;
+
+        self.poses
+            .keys()
+            .copied()
+            .filter(|player_id| cast.ignored_player != Some(*player_id))
+            .filter_map(|player_id| {
+                let pose = self.pose_at_time(player_id, cast.server_time)?;
+                let distance = ray_hitbox_distance(
+                    cast.origin,
+                    direction,
+                    cast.max_distance,
+                    pose.position,
+                    cast.radius,
+                    cast.half_height,
+                )?;
+                Some(LagCompensatedHit {
+                    player_id,
+                    position: cast.origin + direction * distance,
+                    distance,
+                })
+            })
+            .min_by(|a, b| a.distance.total_cmp(&b.distance))
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct LagCompensatedCast {
+    pub server_time: RemoteRenderTime,
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub max_distance: f32,
+    pub radius: f32,
+    pub half_height: f32,
+    pub ignored_player: Option<PlayerId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LagCompensatedHit {
+    pub player_id: PlayerId,
+    pub position: Vec3,
+    pub distance: f32,
 }
 
 #[cfg(test)]

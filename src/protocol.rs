@@ -11,7 +11,7 @@ use bevy_replicon::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
-use crate::player::{RocketFired, RocketHit, WeaponState};
+use crate::player::{ActiveRockets, RocketFired, RocketHit, WeaponState};
 
 pub const DEFAULT_PORT: u16 = 5000;
 pub const FIXED_TIMESTEP_HZ: f64 = 20.0;
@@ -73,11 +73,16 @@ pub struct AhoyUserCmd {
     pub movement: Vec2,
     pub look: Vec2,
     pub buttons: AhoyButtons,
-    /// Newest server tick the client had applied when it built this command —
-    /// the tick its remote player capsules are clamped to. The server sweeps
-    /// rocket-vs-player at this tick via lag-comp history, so both peers judge
-    /// hits against the same poses and the client's prediction holds.
+    /// The remote render time (tick + `seen_alpha`) the client's remote player
+    /// capsules were displayed at when it built this command. The shared step
+    /// sweeps rocket-vs-player at this time via lag-comp history, so both
+    /// peers judge hits against the same poses and the client's prediction
+    /// holds — you hit what you saw.
     pub seen_server_tick: u64,
+    /// Fraction into the tick after [`Self::seen_server_tick`], straight from
+    /// the interpolation clock. Raw f32 on purpose: both peers sample with the
+    /// exact same bits, so the judgments stay identical.
+    pub seen_alpha: f32,
 }
 
 #[derive(Event, Serialize, Deserialize, Clone, Debug, Default)]
@@ -127,9 +132,13 @@ pub struct AhoySnapshot {
     pub velocity: Vec3,
     pub look: Vec2,
     pub state: NetAhoyMoveState,
-    /// The POD's server-corrected subset; the rest of the POD never rides the
-    /// wire because the client re-derives it from its own command stream.
+    /// The POD's server-corrected subset; whatever the client can't re-derive
+    /// from its own command stream (the server may decline a fire it
+    /// predicted) gets stomped over the frame's prediction on every restore.
     pub weapon: WeaponState,
+    /// The server's live rockets, Quake-playerstate style. Count-bounded on
+    /// the wire (no rockets = one byte), so riding every snapshot is cheap.
+    pub rockets: ActiveRockets,
 }
 
 /// [`AhoySnapshot`]'s sibling for plain rigid bodies (vehicles, props): the

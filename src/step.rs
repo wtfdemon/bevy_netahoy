@@ -9,6 +9,7 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
+use crate::math::LagCompensationHistory;
 use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
 use crate::player::{step_player_state, NetAhoyPlayerState, NetAhoyPlayerEvents};
 
@@ -63,14 +64,22 @@ pub struct NetAhoyStepper<'w, 's> {
     // Server-only outbox for what step_player_state fires/blasts; None on the client,
     // where prediction and replay would push duplicates.
     player_events: Option<ResMut<'w, NetAhoyPlayerEvents>>,
+    // Pose history for the rocket-vs-player sweep. Both peers keep one (the
+    // server records live poses, the client mirrors received snapshots); a
+    // bare-App test without it just skips direct hits.
+    poses: Option<Res<'w, LagCompensationHistory>>,
 }
 
 impl NetAhoyStepper<'_, '_> {
-    /// Run one command through one movement step for one player. The infamous Quake `pmove`
+    /// Run one command through one movement step for one player. The infamous Quake `pmove`.
+    /// `previous_sequence`/`previous_buttons` come from the last command actually
+    /// stepped — the gap they leave against `command.sequence` is swept for
+    /// rocket hits, and button rising edges are judged across it.
     pub fn player_move(
         &mut self,
         entity: Entity,
         command: AhoyUserCmd,
+        previous_sequence: u32,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
         let fixed_delta = self.fixed_time.timestep();
@@ -90,7 +99,7 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
 
-        self.player_think(entity, &command, previous_buttons)
+        self.player_think(entity, &command, previous_sequence, previous_buttons)
     }
 
     /// Step the game POD after the KCC step, so client replay and the server
@@ -101,6 +110,7 @@ impl NetAhoyStepper<'_, '_> {
         &mut self,
         entity: Entity,
         command: &AhoyUserCmd,
+        previous_sequence: u32,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
         let (mut player_state, position, look, mut velocity, owner) = {
@@ -121,10 +131,12 @@ impl NetAhoyStepper<'_, '_> {
             self.player_events.as_deref_mut(),
             owner,
             command,
+            previous_sequence,
             previous_buttons,
             position,
             look,
             &spatial,
+            self.poses.as_deref(),
             &mut velocity,
         );
 
@@ -181,10 +193,11 @@ impl NetAhoyStepper<'_, '_> {
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
-        // The net subset: server truth for weapon state stomps whatever the
-        // frame (or default) held. The rockets stay from the frame — they're
-        // re-derivable from the command stream, so they never ride the wire.
+        // The net subset: server truth for weapon and rocket state stomps
+        // whatever the frame (or default) held; replay re-fires only the
+        // rockets from commands after the ack.
         parts.player_state.weapon = snapshot.weapon;
+        parts.player_state.rockets = snapshot.rockets;
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {

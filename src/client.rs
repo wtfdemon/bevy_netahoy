@@ -8,7 +8,7 @@ use bevy_replicon::prelude::*;
 
 use crate::{
     demo::DemoPlayback,
-    math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
+    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
     player::NetAhoyPlayerState,
@@ -46,6 +46,10 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
+            // Client-side mirror of the server's pose history, fed from
+            // received snapshots — the rocket sweep samples it during
+            // prediction and replay so direct hits predict.
+            .init_resource::<LagCompensationHistory>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -507,11 +511,17 @@ fn update_server_clock(
 }
 
 fn buffer_remote_snapshots(
-    mut remotes: Query<(&AhoySnapshot, &mut RemoteInterpolationBuffer), Changed<AhoySnapshot>>,
+    mut history: ResMut<LagCompensationHistory>,
+    mut remotes: Query<
+        (&PlayerId, &AhoySnapshot, &mut RemoteInterpolationBuffer),
+        Changed<AhoySnapshot>,
+    >,
 ) {
-    for (snapshot, mut buffer) in &mut remotes {
+    for (player_id, snapshot, mut buffer) in &mut remotes {
         if snapshot.server_tick != 0 {
-            buffer.push(RemoteSnapshotSample::from_snapshot(snapshot));
+            let sample = RemoteSnapshotSample::from_snapshot(snapshot);
+            buffer.push(sample);
+            history.record(*player_id, sample);
         }
     }
 }
@@ -558,15 +568,25 @@ fn drive_prediction_and_send_input(
         return;
     };
 
+    // The render time the remote capsules were drawn at this frame — what the
+    // player is actually aiming at. It rides the command so the shared step
+    // samples the same poses on both peers.
+    let seen = clock.target_time().unwrap_or_default();
     let command = AhoyUserCmd {
         sequence: input_state.next_sequence.wrapping_add(1),
         movement: input.movement.clamp_length_max(1.0),
         look: input.look,
         buttons: input.buttons,
-        seen_server_tick: clock.latest_server_tick,
+        seen_server_tick: seen.tick,
+        seen_alpha: seen.alpha,
     };
 
-    if let Err(err) = stepper.player_move(predicted_entity, command, input_state.previous_buttons) {
+    if let Err(err) = stepper.player_move(
+        predicted_entity,
+        command,
+        input_state.next_sequence,
+        input_state.previous_buttons,
+    ) {
         warn!(
             "failed to step predicted KCC for command {}: {err}",
             command.sequence
@@ -640,10 +660,12 @@ fn reconcile_local_prediction(
         let xz_error = delta.xz().length();
         let y_error = delta.y.abs();
         let total_error = delta.length();
-        // Weapon state counts as a mismatch too: a server-declined fire must
-        // force the rewind path even when the position error is zero.
+        // Weapon and rocket state count as a mismatch too: a server-declined
+        // fire or a disputed direct hit must force the rewind path even when
+        // the position error is zero.
         let state_mismatch = snapshot.state != ack_frame.state
-            || snapshot.weapon != ack_frame.player_state.weapon;
+            || snapshot.weapon != ack_frame.player_state.weapon
+            || snapshot.rockets != ack_frame.player_state.rockets;
         let ignore_y = snapshot.state.grounded && y_error <= IGNORE_GROUNDED_Y_ERROR;
         (total_error, state_mismatch, xz_error, y_error, ignore_y)
     });
@@ -676,9 +698,12 @@ fn reconcile_local_prediction(
     stepper.restore(predicted_entity, snapshot, local_state);
 
     let replayed = replay_commands.len();
+    let mut previous_sequence = snapshot.last_processed_sequence;
     let mut previous_buttons = snapshot.last_processed_buttons;
     for command in replay_commands {
-        if let Err(err) = stepper.player_move(predicted_entity, command, previous_buttons) {
+        if let Err(err) =
+            stepper.player_move(predicted_entity, command, previous_sequence, previous_buttons)
+        {
             warn!(
                 "failed to replay predicted KCC for command {}: {err}",
                 command.sequence
@@ -687,6 +712,7 @@ fn reconcile_local_prediction(
         if let Some(frame) = stepper.capture_frame(predicted_entity, command) {
             history.push(frame);
         }
+        previous_sequence = command.sequence;
         previous_buttons = command.buttons;
     }
 

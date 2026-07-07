@@ -1,7 +1,7 @@
 //! Takes the moves players send, runs them, and tells everyone what really
 //! happened — plus a little history for lag compensation.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
@@ -9,7 +9,7 @@ use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_replicon::prelude::*;
 
 use crate::{
-    math::{ray_hitbox_distance, sample_buffer_at, RemoteRenderTime, RemoteSnapshotSample},
+    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
     player::{process_rocket_events, NetAhoyPlayerEvents, NetAhoyPlayerState},
@@ -17,7 +17,6 @@ use crate::{
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
 pub const SERVER_CMD_QUEUE_CAPACITY: usize = 256;
-pub const LAG_COMPENSATION_HISTORY_CAPACITY: usize = 128;
 
 #[derive(SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ServerNetAhoySystems {
@@ -112,96 +111,6 @@ impl QueuedUserCmds {
     }
 }
 
-#[derive(Resource, Debug)]
-pub struct LagCompensationHistory {
-    pub max_frames: usize,
-    pub poses: HashMap<PlayerId, VecDeque<RemoteSnapshotSample>>,
-}
-
-impl Default for LagCompensationHistory {
-    fn default() -> Self {
-        Self {
-            max_frames: LAG_COMPENSATION_HISTORY_CAPACITY,
-            poses: HashMap::new(),
-        }
-    }
-}
-
-impl LagCompensationHistory {
-    pub fn record(&mut self, player_id: PlayerId, sample: RemoteSnapshotSample) {
-        let samples = self
-            .poses
-            .entry(player_id)
-            .or_insert_with(|| VecDeque::with_capacity(self.max_frames));
-        if samples
-            .back()
-            .is_some_and(|last| last.server_tick == sample.server_tick)
-        {
-            *samples.back_mut().unwrap() = sample;
-            return;
-        }
-
-        if samples.len() == self.max_frames {
-            samples.pop_front();
-        }
-        samples.push_back(sample);
-    }
-
-    pub fn pose_at_time(
-        &self,
-        player_id: PlayerId,
-        server_time: RemoteRenderTime,
-    ) -> Option<RemoteSnapshotSample> {
-        sample_buffer_at(self.poses.get(&player_id)?, server_time)
-    }
-
-    /// Ray-test every player's hitbox (the movement cylinder) as it stood at
-    /// `server_time` — the timestamp the shooter's client sampled its screen at.
-    pub fn raycast_hitboxes_at_time(&self, cast: LagCompensatedCast) -> Option<LagCompensatedHit> {
-        let direction = cast.direction.try_normalize()?;
-
-        self.poses
-            .keys()
-            .copied()
-            .filter(|player_id| cast.ignored_player != Some(*player_id))
-            .filter_map(|player_id| {
-                let pose = self.pose_at_time(player_id, cast.server_time)?;
-                let distance = ray_hitbox_distance(
-                    cast.origin,
-                    direction,
-                    cast.max_distance,
-                    pose.position,
-                    cast.radius,
-                    cast.half_height,
-                )?;
-                Some(LagCompensatedHit {
-                    player_id,
-                    position: cast.origin + direction * distance,
-                    distance,
-                })
-            })
-            .min_by(|a, b| a.distance.total_cmp(&b.distance))
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct LagCompensatedCast {
-    pub server_time: RemoteRenderTime,
-    pub origin: Vec3,
-    pub direction: Vec3,
-    pub max_distance: f32,
-    pub radius: f32,
-    pub half_height: f32,
-    pub ignored_player: Option<PlayerId>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LagCompensatedHit {
-    pub player_id: PlayerId,
-    pub position: Vec3,
-    pub distance: f32,
-}
-
 fn advance_server_tick(mut tick: ResMut<ServerTick>) {
     tick.0 = tick.0.wrapping_add(1);
 }
@@ -223,19 +132,36 @@ fn queue_player_commands(
 }
 
 fn apply_player_commands(
+    tick: Res<ServerTick>,
     mut players: Query<(Entity, &mut ServerCommandBuffer, &mut QueuedUserCmds), With<PlayerOwner>>,
     mut stepper: NetAhoyStepper,
 ) {
+    let min_rewind_tick = tick.0.saturating_sub(crate::math::LAG_COMPENSATION_HISTORY_CAPACITY as u64);
+
     for (player, mut command_buffer, mut queued) in &mut players {
         let mut processed = 0;
 
         while processed < SERVER_USERCMD_BUDGET_PER_PLAYER {
-            let Some(command) = queued.pop_next() else {
+            let Some(mut command) = queued.pop_next() else {
                 stepper.clear_transient(player);
                 break;
             };
 
-            if let Err(err) = stepper.player_move(player, command, command_buffer.last_buttons) {
+            // Sanitize the client's claimed view time: no further back than
+            // the pose history holds, never into the server's future. A
+            // clamped command can disagree with the client's prediction —
+            // the rocket snapshot correction absorbs that.
+            let seen = RemoteRenderTime::new(command.seen_server_tick, command.seen_alpha)
+                .clamp_ticks(min_rewind_tick, tick.0);
+            command.seen_server_tick = seen.tick;
+            command.seen_alpha = seen.alpha;
+
+            if let Err(err) = stepper.player_move(
+                player,
+                command,
+                command_buffer.last_processed_sequence,
+                command_buffer.last_buttons,
+            ) {
                 warn!(
                     "failed to step server KCC for {player} command {}: {err}",
                     command.sequence
@@ -283,6 +209,7 @@ fn publish_authoritative_player_snapshots(
         snapshot.look = Vec2::new(look.yaw, look.pitch);
         snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
         snapshot.weapon = player_state.map(|state| state.weapon).unwrap_or_default();
+        snapshot.rockets = player_state.map(|state| state.rockets).unwrap_or_default();
     }
 }
 

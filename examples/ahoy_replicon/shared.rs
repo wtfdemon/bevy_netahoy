@@ -170,12 +170,12 @@ pub fn spawn_world_render(
 
 pub fn player_controller() -> CharacterController {
     CharacterController {
-        // World + other players. Both peers build the KCC from this one
-        // function, so prediction and server resolve movement against the
-        // same set: world geometry, vehicle chassis (world-layer members),
-        // and player capsules (client-side: static capsules at the newest
-        // snapshot pose — see `attach_remote_player_colliders`).
-        filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER | PLAYER_COLLISION_LAYER),
+        // World only — players are NOT solid to each other. A hard wall at
+        // another player's pose mispredicts sharply (the peers disagree on
+        // where that pose is); instead the shared step applies a TF2-style
+        // separation push from lag-comp poses, which predicts cleanly. See
+        // PLAYER_PUSH_SPEED in bevy_netahoy::player.
+        filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
         air_acceleration_hz: 120.0,
         speed: 6.5,
