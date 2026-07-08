@@ -206,8 +206,7 @@ fn publish_authoritative_player_snapshots(
         snapshot.velocity = **velocity;
         snapshot.look = Vec2::new(look.yaw, look.pitch);
         snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
-        snapshot.weapon = player_state.weapon;
-        snapshot.rockets = player_state.rockets;
+        snapshot.player_state = *player_state;
     }
 }
 

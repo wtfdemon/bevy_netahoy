@@ -14,8 +14,8 @@
 //! hit. A rocket is removed the moment it blasts; older frames hold their own
 //! copies, so any rewind that needs to replay across the blast just
 //! re-derives it. The live list also rides [`crate::protocol::AhoySnapshot`]
-//! and stomps the frame's rockets on restore, so any residual disagreement
-//! (clamped rewinds, pose gaps from packet loss) heals in one ack.
+//! through the player state and gets stomped on restore, so any residual
+//! disagreement (clamped rewinds, pose gaps from packet loss) heals in one ack.
 //!
 //! [`AhoyPredictionFrame`]: crate::step::AhoyPredictionFrame
 
@@ -45,7 +45,8 @@ pub const EQUIP_BAZOOKA: AhoyButtons = AhoyButtons::from_bits_retain(1 << 18);
 /// Rocket tuning. Plain consts so client and server share them with no resource.
 const EYE_HEIGHT: f32 = 0.6;
 /// Public so presentation can animate flight (`hit_distance / ROCKET_SPEED`).
-pub const ROCKET_SPEED: f32 = 42.0;
+//pub const ROCKET_SPEED: f32 = 42.0; // old
+pub const ROCKET_SPEED: f32 = 84.0;
 const LIFETIME_SECONDS: f32 = 1.35;
 /// Public so game code can judge "was I in the blast?" (e.g. hit reactions).
 pub const SPLASH_RADIUS: f32 = 4.0;
@@ -193,12 +194,9 @@ pub enum WeaponSlot {
     Bazooka,
 }
 
-/// The replicated weapon subset of the POD — the part the client cannot
-/// re-derive from its own commands (the server may decline a fire the client
-/// predicted), so it rides [`crate::protocol::AhoySnapshot`] and gets stomped
-/// over the frame's prediction on every restore. One flat `Copy` struct so
-/// "apply server truth" stays a single assignment no matter how many fields
-/// games add to it.
+/// The weapon subset of the POD. It rides [`crate::protocol::AhoySnapshot`]
+/// inside [`NetAhoyPlayerState`] because the server may decline a fire the
+/// client predicted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeaponState {
     pub equipped: WeaponSlot,
@@ -293,7 +291,7 @@ impl TryFrom<Vec<Rocket>> for ActiveRockets {
 /// peers; [`crate::step::NetAhoyStepper`] steps it, copies it into every
 /// prediction frame, and restores it whole on rewind. C-style on purpose:
 /// fixed storage, `Copy`, no heap — every clone the netcode makes is a memcpy.
-#[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct NetAhoyPlayerState {
     pub rockets: ActiveRockets,
     pub weapon: WeaponState,

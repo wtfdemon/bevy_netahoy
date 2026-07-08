@@ -667,9 +667,8 @@ fn reconcile_local_prediction(
         // Weapon and rocket state count as a mismatch too: a server-declined
         // fire or a disputed direct hit must force the rewind path even when
         // the position error is zero.
-        let state_mismatch = snapshot.state != ack_frame.state
-            || snapshot.weapon != ack_frame.player_state.weapon
-            || snapshot.rockets != ack_frame.player_state.rockets;
+        let state_mismatch =
+            snapshot.state != ack_frame.state || snapshot.player_state != ack_frame.player_state;
         let ignore_y = snapshot.state.grounded && y_error <= IGNORE_GROUNDED_Y_ERROR;
         (total_error, state_mismatch, xz_error, y_error, ignore_y)
     });

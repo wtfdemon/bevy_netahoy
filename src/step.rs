@@ -192,11 +192,9 @@ impl NetAhoyStepper<'_, '_> {
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
-        // The net subset: server truth for weapon and rocket state stomps
-        // whatever the frame (or default) held; replay re-fires only the
-        // rockets from commands after the ack.
-        parts.player_state.weapon = snapshot.weapon;
-        parts.player_state.rockets = snapshot.rockets;
+        // Server truth stomps whatever the frame (or default) held; replay
+        // re-fires only the rockets from commands after the ack.
+        *parts.player_state = snapshot.player_state;
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {
