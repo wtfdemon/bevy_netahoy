@@ -5,8 +5,19 @@ client_name := "ahoy_client"
 port := "5000"
 web_port := "8080"
 
-# Build the websocket server/client examples for Windows from WSL2 and run local player windows.
+# Build the websocket server/client examples for Windows from WSL2 and run local player windows with poor networking.
 win-dev players="2" slowmo="1.0" show_ghosts="false":
+    @just _win-local "{{players}}" "{{slowmo}}" "{{show_ghosts}}" "true" ""
+
+# Build the websocket server/client examples for Windows from WSL2 and run local player windows without simulated ping/loss.
+win-perfect players="2" slowmo="1.0" show_ghosts="false":
+    @just _win-local "{{players}}" "{{slowmo}}" "{{show_ghosts}}" "false" ""
+
+# Build the Windows server/client examples and record the first client to a demo file.
+win-record demo="my.ahoydem" players="1" slowmo="1.0" show_ghosts="false":
+    @just _win-local "{{players}}" "{{slowmo}}" "{{show_ghosts}}" "true" "{{demo}}"
+
+_win-local players slowmo show_ghosts poor_net record_path:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -20,8 +31,11 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     PLAYERS="{{players}}"
     SLOWMO="{{slowmo}}"
     SHOW_GHOSTS="{{show_ghosts}}"
-    SERVER_ARGS=(--poor-net)
-    CLIENT_ARGS=(--poor-net)
+    POOR_NET="{{poor_net}}"
+    RECORD_PATH="{{record_path}}"
+    SERVER_ARGS=()
+    CLIENT_ARGS=()
+    NET_LABEL="normal network conditions"
     PIDS=()
 
     command -v cmd.exe >/dev/null 2>&1 || { echo "cmd.exe not found; run this from WSL2."; exit 1; }
@@ -29,6 +43,11 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     [[ "${SLOWMO}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "slowmo must be a positive number"; exit 2; }
     [[ "${SHOW_GHOSTS}" == "true" || "${SHOW_GHOSTS}" == "false" ]] || { echo "show_ghosts must be true or false"; exit 2; }
 
+    if [[ "${POOR_NET}" == "true" ]]; then
+        SERVER_ARGS+=(--poor-net)
+        CLIENT_ARGS+=(--poor-net)
+        NET_LABEL="poor network conditions"
+    fi
     if [[ "${SLOWMO}" != "1" && "${SLOWMO}" != "1.0" ]]; then
         SERVER_ARGS+=(--slowmo "${SLOWMO}")
         CLIENT_ARGS+=(--slowmo "${SLOWMO}")
@@ -61,7 +80,7 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     }
     trap cleanup EXIT INT TERM
 
-    echo "Starting server with poor network conditions and time scale ${SLOWMO}x..."
+    echo "Starting server with ${NET_LABEL} and time scale ${SLOWMO}x..."
     (cd "${STAGE_DIR}" && "./${SERVER_NAME}.exe" "${SERVER_ARGS[@]}") &
     PIDS+=("$!")
 
@@ -75,13 +94,56 @@ win-dev players="2" slowmo="1.0" show_ghosts="false":
     sleep 1
 
     for id in $(seq 1 "${PLAYERS}"); do
-        echo "Starting client ${id} with poor network conditions, time scale ${SLOWMO}x, show ghosts ${SHOW_GHOSTS}..."
-        (cd "${STAGE_DIR}" && "./${CLIENT_NAME}.exe" "${CLIENT_ARGS[@]}") &
+        EXTRA_CLIENT_ARGS=("${CLIENT_ARGS[@]}")
+        if [[ "${id}" == "1" && -n "${RECORD_PATH}" ]]; then
+            EXTRA_CLIENT_ARGS+=(--record "${RECORD_PATH}")
+            echo "Starting recording client ${id} with ${NET_LABEL}, time scale ${SLOWMO}x, show ghosts ${SHOW_GHOSTS}; demo: ${RECORD_PATH}"
+        else
+            echo "Starting client ${id} with ${NET_LABEL}, time scale ${SLOWMO}x, show ghosts ${SHOW_GHOSTS}..."
+        fi
+        (cd "${STAGE_DIR}" && "./${CLIENT_NAME}.exe" "${EXTRA_CLIENT_ARGS[@]}") &
         PIDS+=("$!")
         sleep 1
     done
 
     wait
+
+# Build the Windows client example and play a demo without starting a server.
+win-play demo="my.ahoydem" show_ghosts="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    WIN_TARGET="{{win_target}}"
+    STAGE_DIR="{{stage_dir}}"
+    CLIENT_NAME="{{client_name}}"
+    CLIENT_EXE="./target/${WIN_TARGET}/win-dev/examples/${CLIENT_NAME}.exe"
+    DEMO="{{demo}}"
+    SHOW_GHOSTS="{{show_ghosts}}"
+    CLIENT_ARGS=(--play "${DEMO}")
+
+    command -v cmd.exe >/dev/null 2>&1 || { echo "cmd.exe not found; run this from WSL2."; exit 1; }
+    [[ "${SHOW_GHOSTS}" == "true" || "${SHOW_GHOSTS}" == "false" ]] || { echo "show_ghosts must be true or false"; exit 2; }
+    if [[ "${SHOW_GHOSTS}" == "true" ]]; then
+        CLIENT_ARGS+=(--show-ghosts)
+    fi
+
+    cmd.exe /C "taskkill /IM ${CLIENT_NAME}.exe /F >NUL 2>&1" || true
+
+    echo "Building ${CLIENT_NAME} for Windows..."
+    cargo build --example "${CLIENT_NAME}" --target "${WIN_TARGET}" --profile win-dev
+
+    echo "Staging to E:\\bevy-netahoy-dev..."
+    mkdir -p "${STAGE_DIR}"
+    cp "${CLIENT_EXE}" "${STAGE_DIR}/${CLIENT_NAME}.exe"
+
+    if [[ "${DEMO}" != /* && "${DEMO}" != *:* && ! -f "${STAGE_DIR}/${DEMO}" ]]; then
+        echo "demo not found at ${STAGE_DIR}/${DEMO}"
+        echo "Relative demo paths are resolved from E:\\bevy-netahoy-dev."
+        exit 1
+    fi
+
+    echo "Playing demo ${DEMO} from E:\\bevy-netahoy-dev..."
+    cd "${STAGE_DIR}" && "./${CLIENT_NAME}.exe" "${CLIENT_ARGS[@]}"
 
 # Build the browser client, run a local websocket server, and serve the web shell.
 win-web poor_net="false" web_port="8080":

@@ -18,7 +18,9 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
+mod rockets;
 mod shared;
+mod vehicle;
 use hitscan::ExampleHitscanClientSystems;
 use shared::*;
 
@@ -31,6 +33,7 @@ fn main() -> AppExit {
     let poor_network = poor_network_from_args();
     let time_scale = debug_time_scale_from_args();
     let remote_ghost_debug = remote_ghost_debug_from_args();
+    let demo = DemoArgs::from_args();
 
     let mut app = App::new();
     app.insert_resource(ClientLook::default())
@@ -61,9 +64,34 @@ fn main() -> AppExit {
         AhoyPlugins::new(NetAhoyKccSchedule),
         ExampleSharedPlugin,
         ClientNetAhoyPlugin,
-        ClientPlugin,
+        ClientPlugin { demo },
     ))
     .run()
+}
+
+#[derive(Default)]
+struct DemoArgs {
+    record: Option<std::path::PathBuf>,
+    play: Option<std::path::PathBuf>,
+}
+
+impl DemoArgs {
+    fn from_args() -> Self {
+        Self {
+            record: path_arg("--record"),
+            play: path_arg("--play"),
+        }
+    }
+}
+
+fn path_arg(flag: &str) -> Option<std::path::PathBuf> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == flag {
+            return args.next().map(Into::into);
+        }
+    }
+    None
 }
 
 fn remote_ghost_debug_from_args() -> RemoteGhostDebug {
@@ -109,18 +137,36 @@ type CameraRigFilter = (
     Without<LocalPresentationPlayer>,
 );
 
-struct ClientPlugin;
+struct ClientPlugin {
+    demo: DemoArgs,
+}
 
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         hitscan::add_client_hitscan(app);
+        rockets::add_client_rockets(app);
+        vehicle::add_client_vehicles(app);
 
-        app.add_plugins((WebSocketClientPlugin, AeronetRepliconClientPlugin))
-            .add_observer(use_replicon_for_session)
-            .add_observer(set_window_title_on_join)
+        if let Some(path) = &self.demo.play {
+            // Demo playback IS the network backend; no websocket, no session.
+            app.add_plugins(DemoPlaybackPlugin { path: path.clone() })
+                .add_systems(
+                    Update,
+                    demo_playback_controls.run_if(resource_exists::<DemoPlayback>),
+                );
+        } else {
+            app.add_plugins((WebSocketClientPlugin, AeronetRepliconClientPlugin))
+                .add_observer(use_replicon_for_session)
+                .add_systems(Startup, setup_client);
+            if let Some(path) = &self.demo.record {
+                app.add_plugins(DemoRecordPlugin { path: path.clone() });
+            }
+        }
+
+        app.add_observer(set_window_title_on_join)
             .add_observer(log_connected)
             .add_observer(log_disconnected)
-            .add_systems(Startup, (setup_client, setup_scene, setup_hud))
+            .add_systems(Startup, (setup_scene, setup_hud))
             .add_systems(
                 Update,
                 (
@@ -348,7 +394,7 @@ fn attach_player_meshes(
         };
 
         commands.entity(entity).insert((
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color,
                 alpha_mode,
@@ -386,14 +432,14 @@ fn spawn_client_prediction_kcc(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    local_players: Query<(Entity, &Transform, Option<&AhoySnapshot>), Added<ServerTruthGhost>>,
+    local_players: Query<(Entity, &PlayerId, &Transform, Option<&AhoySnapshot>), Added<ServerTruthGhost>>,
     predictions: Query<Entity, With<ClientPredictionKcc>>,
 ) {
     if predictions.iter().next().is_some() {
         return;
     }
 
-    for (server_entity, transform, authoritative_state) in &local_players {
+    for (server_entity, player_id, transform, authoritative_state) in &local_players {
         let position = authoritative_state
             .map(|state| state.position)
             .unwrap_or(transform.translation);
@@ -405,6 +451,7 @@ fn spawn_client_prediction_kcc(
             .spawn((
                 Name::new("client prediction kcc"),
                 ClientPredictionKcc { server_entity },
+                *player_id,
                 CharacterLook {
                     yaw: look.x,
                     pitch: look.y,
@@ -415,7 +462,7 @@ fn spawn_client_prediction_kcc(
                 Position::new(position),
                 Rotation::IDENTITY,
                 LinearVelocity::ZERO,
-                Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+                Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
                 MeshMaterial3d(materials.add(StandardMaterial {
                     base_color: Color::srgba(0.1, 1.0, 0.45, 0.38),
                     alpha_mode: AlphaMode::Blend,
@@ -430,7 +477,7 @@ fn spawn_client_prediction_kcc(
         commands.spawn((
             Name::new("local presentation player"),
             LocalPresentationPlayer { prediction_entity },
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: Color::srgb(1.0, 0.83, 0.22),
                 perceptual_roughness: 0.7,
@@ -476,7 +523,7 @@ fn spawn_remote_player_visuals(
                 yaw: look.x,
                 pitch: look.y,
             },
-            Mesh3d(meshes.add(Capsule3d::new(PLAYER_CAPSULE_RADIUS, 1.5))),
+            Mesh3d(meshes.add(Cylinder::new(PLAYER_CAPSULE_RADIUS, 1.5))),
             MeshMaterial3d(materials.add(StandardMaterial {
                 base_color: player_display_color(*player_id),
                 perceptual_roughness: 0.75,
@@ -538,6 +585,7 @@ fn update_client_look(
 
 fn gather_client_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
     look: Res<ClientLook>,
     mut input: ResMut<ClientInput>,
 ) {
@@ -557,30 +605,71 @@ fn gather_client_input(
 
     input.movement = movement;
     input.look = Vec2::new(look.yaw, look.pitch);
-    input.buttons = AhoyButtons {
-        jump: keys.pressed(KeyCode::Space),
-        crouch: keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC),
-        tac: keys.pressed(KeyCode::ShiftLeft),
-        mantle: keys.pressed(KeyCode::KeyE),
-        crane: keys.pressed(KeyCode::KeyQ),
-        climbdown: keys.pressed(KeyCode::KeyZ),
-        swim_up: keys.pressed(KeyCode::Space),
-    };
+    let mut buttons = AhoyButtons::empty();
+    buttons.set(AhoyButtons::JUMP, keys.pressed(KeyCode::Space));
+    buttons.set(
+        AhoyButtons::CROUCH,
+        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::KeyC),
+    );
+    // Tac shares the jump button, exactly like Ahoy (Space drives jump/tac/
+    // crane/mantle and the state machine picks). ShiftLeft kept to isolate-test.
+    buttons.set(
+        AhoyButtons::TAC,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::ShiftLeft),
+    );
+    // Like Ahoy, Space also drives crane + mantle; E/Q kept to isolate-test.
+    buttons.set(
+        AhoyButtons::MANTLE,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyE),
+    );
+/*     buttons.set(
+        AhoyButtons::CRANE,
+        keys.pressed(KeyCode::Space) || keys.pressed(KeyCode::KeyQ),
+    ); */
+    buttons.set(AhoyButtons::CLIMBDOWN, keys.pressed(KeyCode::KeyZ));
+    buttons.set(AhoyButtons::SWIM_UP, keys.pressed(KeyCode::Space));
+    // The demo has no weapon switching; always carry the launcher.
+    buttons.set(EQUIP_BAZOOKA, true);
+    buttons.set(
+        ROCKET_FIRE,
+        mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),
+    );
+    input.buttons = buttons;
 }
 
 fn update_camera_from_local_presentation(
     look: Res<ClientLook>,
+    playback: Option<Res<DemoPlayback>>,
+    driven: Query<&Transform, (With<vehicle::LocalVehicleSim>, Without<Camera3d>)>,
     presentations: Query<&Transform, (With<LocalPresentationPlayer>, Without<Camera3d>)>,
     server_players: Query<&AhoySnapshot, With<ServerTruthGhost>>,
+    remote_visuals: Query<(&RemotePlayerVisual, &Transform), Without<Camera3d>>,
     mut camera: Single<&mut Transform, CameraRigFilter>,
 ) {
-    let target = presentations
+    // While driving, orbit the locally simulated buggy (there is no capsule).
+    let target = driven
         .single()
-        .map(|transform| transform.translation + Vec3::Y * 0.6)
-        .or_else(|_| {
+        .ok()
+        .map(|transform| transform.translation + Vec3::Y * 0.9)
+        .or_else(|| {
+            presentations
+                .single()
+                .ok()
+                .map(|transform| transform.translation + Vec3::Y * 0.6)
+        })
+        .or_else(|| {
             server_players
                 .single()
+                .ok()
                 .map(|snapshot| snapshot.position + Vec3::Y * 0.6)
+        })
+        .or_else(|| {
+            // Demo playback: chase the recorded player's interpolated visual.
+            let recorded = playback.as_ref()?.recorded_player?;
+            remote_visuals
+                .iter()
+                .find(|(visual, _)| visual.player_id.0 == recorded)
+                .map(|(_, transform)| transform.translation + Vec3::Y * 0.6)
         })
         .unwrap_or(SPAWN_POINT);
     let rotation = Quat::from_euler(EulerRot::YXZ, look.yaw, look.pitch, 0.0);
@@ -596,13 +685,28 @@ fn update_camera_from_local_presentation(
 
 fn update_speed_text(
     mut text: Single<&mut Text, With<SpeedText>>,
+    sim_velocity: Option<Single<&LinearVelocity, With<vehicle::LocalVehicleSim>>>,
     predicted_velocity: Option<Single<&LinearVelocity, With<ClientPredictionKcc>>>,
     server_velocity: Option<Single<&LinearVelocity, With<ServerTruthGhost>>>,
 ) {
-    if let Some(velocity) = predicted_velocity {
+    if let Some(velocity) = sim_velocity {
+        text.0 = format!("driving {:.3}", velocity.xz().length());
+    } else if let Some(velocity) = predicted_velocity {
         text.0 = format!("predicted {:.3}", velocity.xz().length());
     } else if let Some(velocity) = server_velocity {
         text.0 = format!("{:.3}", velocity.xz().length());
+    }
+}
+
+fn demo_playback_controls(keys: Res<ButtonInput<KeyCode>>, mut playback: ResMut<DemoPlayback>) {
+    if keys.just_pressed(KeyCode::Space) {
+        playback.speed = if playback.speed == 0.0 { 1.0 } else { 0.0 };
+    }
+    if keys.just_pressed(KeyCode::ArrowUp) {
+        playback.speed = (playback.speed * 2.0).clamp(0.25, 8.0);
+    }
+    if keys.just_pressed(KeyCode::ArrowDown) {
+        playback.speed = (playback.speed * 0.5).clamp(0.25, 8.0);
     }
 }
 
@@ -611,9 +715,23 @@ fn update_status_text(
     state: Res<State<ClientState>>,
     time_scale: Res<DebugTimeScale>,
     debug_ghosts: Res<RemoteGhostDebug>,
+    playback: Option<Res<DemoPlayback>>,
     mut text: Single<&mut Text, With<StatusText>>,
 ) {
-    let mut status = format!("{} - {:?}", local.label(), state.get());
+    let mut status = if let Some(playback) = &playback {
+        format!(
+            "demo {} - {:.1}s / {:.1}s - {}x",
+            playback
+                .recorded_player
+                .map(|id| format!("player {id}"))
+                .unwrap_or_else(|| "?".to_string()),
+            playback.clock.min(playback.duration()),
+            playback.duration(),
+            playback.speed,
+        )
+    } else {
+        format!("{} - {:?}", local.label(), state.get())
+    };
     if time_scale.is_scaled() {
         status.push_str(&format!(" - slowmo {:.2}x", time_scale.factor));
     }

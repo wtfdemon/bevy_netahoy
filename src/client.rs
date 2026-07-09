@@ -1,8 +1,5 @@
-//! Client-side prediction, reconciliation, and remote-player interpolation.
-//!
-//! The game feeds [`ClientInput`] every frame and spawns a prediction entity
-//! (tagged [`ClientPredictionKcc`]) when its local [`ServerTruthGhost`]
-//! appears; this plugin does the rest.
+//! Lives on the player's machine: guesses where they're going (prediction),
+//! fixes the guess when the server disagrees (reconciliation), draws everyone.
 
 use std::collections::VecDeque;
 
@@ -10,15 +7,19 @@ use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 
 use crate::{
-    math::{RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
-    pmove::{AhoyPredictionFrame, NetAhoyStepper},
+    demo::DemoPlayback,
+    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
+    step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
+    player::{NetAhoyPlayerEvents, NetAhoyPlayerState},
 };
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
 pub const PREDICTION_HISTORY_CAPACITY: usize = 256;
 pub const REMOTE_INTERPOLATION_CAPACITY: usize = 64;
-pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 6;
+/// 4 ticks = 200 ms at 20 Hz. Two ticks of headroom over the minimum pair to
+/// interpolate between; capped extrapolation covers the gaps loss opens up.
+pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 2;
 pub const REMOTE_CLOCK_MAX_CATCHUP_RATE: f64 = 0.10;
 pub const IGNORE_XZ_ERROR: f32 = 0.035;
 pub const IGNORE_GROUNDED_Y_ERROR: f32 = 0.20;
@@ -45,6 +46,14 @@ impl Plugin for ClientNetAhoyPlugin {
             .init_resource::<PredictionHistory>()
             .init_resource::<LocalCommandHistory>()
             .init_resource::<ClientServerClock>()
+            // Client-side mirror of the server's pose history, fed from
+            // received snapshots — the rocket sweep samples it during
+            // prediction and replay so direct hits predict.
+            .init_resource::<LagCompensationHistory>()
+            // The predicted outbox: what the local step fired/blasted. The
+            // game drains it for instant fire/explosion presentation,
+            // deduping by RocketId (replay pushes duplicates).
+            .init_resource::<NetAhoyPlayerEvents>()
             .add_observer(set_local_player_id)
             .add_systems(OnEnter(ClientState::Connected), announce_join)
             .configure_sets(
@@ -103,6 +112,8 @@ impl LocalPlayerId {
 pub struct ClientInput {
     pub movement: Vec2,
     pub look: Vec2,
+    /// Library buttons plus any game-defined bits (e.g. weapon fire) the game
+    /// sets in the high range. The library never interprets the game bits.
     pub buttons: AhoyButtons,
 }
 
@@ -121,7 +132,7 @@ pub struct ServerTruthGhost;
 /// The locally simulated KCC the camera and gameplay should treat as the
 /// player. Spawned by the game when its [`ServerTruthGhost`] appears.
 #[derive(Component)]
-#[require(PredictionCorrection)]
+#[require(PredictionCorrection, NetAhoyPlayerState)]
 pub struct ClientPredictionKcc {
     pub server_entity: Entity,
 }
@@ -210,8 +221,12 @@ impl PredictionHistory {
     }
 
     pub fn retain_after(&mut self, sequence: u32) {
-        self.frames
-            .retain(|frame| sequence_is_newer(frame.command.sequence, sequence));
+        // Keep the frame AT `sequence`: a later snapshot can repeat the same
+        // ack (dropped inputs, external impulses) and must re-compare against it.
+        self.frames.retain(|frame| {
+            frame.command.sequence == sequence
+                || sequence_is_newer(frame.command.sequence, sequence)
+        });
     }
 
     pub fn clear(&mut self) {
@@ -386,7 +401,20 @@ fn announce_join(mut commands: Commands) {
     commands.client_trigger(JoinRequest);
 }
 
-fn set_local_player_id(accepted: On<JoinAccepted>, mut local: ResMut<LocalPlayerId>) {
+fn set_local_player_id(
+    accepted: On<JoinAccepted>,
+    mut local: ResMut<LocalPlayerId>,
+    playback: Option<ResMut<DemoPlayback>>,
+) {
+    // In demo playback the recorded JoinAccepted replays, but nobody is local —
+    // remember whose demo this is (spectator cam target) and keep LocalPlayerId
+    // unset so no prediction path ever engages.
+    if let Some(mut playback) = playback {
+        playback.recorded_player = Some(accepted.player_id);
+        info!("demo recorded by player {}", accepted.player_id);
+        return;
+    }
+
     local.0 = Some(accepted.player_id);
     info!("joined as player {}", accepted.player_id);
 }
@@ -410,6 +438,7 @@ fn mark_server_truth_ghost(
 fn tag_remote_players(
     mut commands: Commands,
     local: Res<LocalPlayerId>,
+    playback: Option<Res<DemoPlayback>>,
     players: Query<
         (Entity, &PlayerId),
         (
@@ -419,12 +448,18 @@ fn tag_remote_players(
         ),
     >,
 ) {
-    let Some(local_id) = local.0 else {
-        return;
+    // In demo playback nobody is local: every player interpolates.
+    let local_id = if playback.is_some() {
+        None
+    } else {
+        let Some(local_id) = local.0 else {
+            return;
+        };
+        Some(local_id)
     };
 
     for (entity, player_id) in &players {
-        if player_id.0 != local_id {
+        if Some(player_id.0) != local_id {
             commands
                 .entity(entity)
                 .insert(RemoteInterpolationBuffer::default());
@@ -480,11 +515,17 @@ fn update_server_clock(
 }
 
 fn buffer_remote_snapshots(
-    mut remotes: Query<(&AhoySnapshot, &mut RemoteInterpolationBuffer), Changed<AhoySnapshot>>,
+    mut history: ResMut<LagCompensationHistory>,
+    mut remotes: Query<
+        (&PlayerId, &AhoySnapshot, &mut RemoteInterpolationBuffer),
+        Changed<AhoySnapshot>,
+    >,
 ) {
-    for (snapshot, mut buffer) in &mut remotes {
+    for (player_id, snapshot, mut buffer) in &mut remotes {
         if snapshot.server_tick != 0 {
-            buffer.push(RemoteSnapshotSample::from_snapshot(snapshot));
+            let sample = RemoteSnapshotSample::from_snapshot(snapshot);
+            buffer.push(sample);
+            history.record(*player_id, sample);
         }
     }
 }
@@ -521,6 +562,7 @@ fn interpolate_remote_players(
 fn drive_prediction_and_send_input(
     mut commands: Commands,
     input: Res<ClientInput>,
+    clock: Res<ClientServerClock>,
     mut input_state: ResMut<ClientInputState>,
     mut command_history: ResMut<LocalCommandHistory>,
     predictions: Query<Entity, With<ClientPredictionKcc>>,
@@ -530,14 +572,25 @@ fn drive_prediction_and_send_input(
         return;
     };
 
+    // The render time the remote capsules were drawn at this frame — what the
+    // player is actually aiming at. It rides the command so the shared step
+    // samples the same poses on both peers.
+    let seen = clock.target_time().unwrap_or_default();
     let command = AhoyUserCmd {
         sequence: input_state.next_sequence.wrapping_add(1),
         movement: input.movement.clamp_length_max(1.0),
         look: input.look,
         buttons: input.buttons,
+        seen_server_tick: seen.tick,
+        seen_alpha: seen.alpha,
     };
 
-    if let Err(err) = stepper.pmove(predicted_entity, command, input_state.previous_buttons) {
+    if let Err(err) = stepper.player_move(
+        predicted_entity,
+        command,
+        input_state.next_sequence,
+        input_state.previous_buttons,
+    ) {
         warn!(
             "failed to step predicted KCC for command {}: {err}",
             command.sequence
@@ -605,22 +658,17 @@ fn reconcile_local_prediction(
         return;
     }
 
-    if snapshot.last_processed_sequence == correction.last_ack_sequence {
-        history.retain_after(snapshot.last_processed_sequence);
-        correction.mode = CorrectionMode::Ignored;
-        correction.last_server_tick = snapshot.server_tick;
-        correction.last_error = 0.0;
-        correction.replayed_commands = 0;
-        return;
-    }
-
     let ack_frame = history.get(snapshot.last_processed_sequence).cloned();
     let history_error = ack_frame.as_ref().map(|ack_frame| {
         let delta = snapshot.position - ack_frame.position;
         let xz_error = delta.xz().length();
         let y_error = delta.y.abs();
         let total_error = delta.length();
-        let state_mismatch = snapshot.state != ack_frame.state;
+        // Weapon and rocket state count as a mismatch too: a server-declined
+        // fire or a disputed direct hit must force the rewind path even when
+        // the position error is zero.
+        let state_mismatch =
+            snapshot.state != ack_frame.state || snapshot.player_state != ack_frame.player_state;
         let ignore_y = snapshot.state.grounded && y_error <= IGNORE_GROUNDED_Y_ERROR;
         (total_error, state_mismatch, xz_error, y_error, ignore_y)
     });
@@ -642,16 +690,23 @@ fn reconcile_local_prediction(
     let current_position = stepper.position(predicted_entity).unwrap_or(snapshot.position);
     let old_visible_position = current_position + correction.presentation_offset;
     let replay_commands = command_history.after_sequence(snapshot.last_processed_sequence);
-    let local_state = ack_frame
-        .as_ref()
-        .map(|ack_frame| (&ack_frame.controller_state, &ack_frame.accumulated_input));
+    let local_state = ack_frame.as_ref().map(|ack_frame| {
+        (
+            &ack_frame.controller_state,
+            &ack_frame.accumulated_input,
+            &ack_frame.player_state,
+        )
+    });
 
     stepper.restore(predicted_entity, snapshot, local_state);
 
     let replayed = replay_commands.len();
+    let mut previous_sequence = snapshot.last_processed_sequence;
     let mut previous_buttons = snapshot.last_processed_buttons;
     for command in replay_commands {
-        if let Err(err) = stepper.pmove(predicted_entity, command, previous_buttons) {
+        if let Err(err) =
+            stepper.player_move(predicted_entity, command, previous_sequence, previous_buttons)
+        {
             warn!(
                 "failed to replay predicted KCC for command {}: {err}",
                 command.sequence
@@ -660,6 +715,7 @@ fn reconcile_local_prediction(
         if let Some(frame) = stepper.capture_frame(predicted_entity, command) {
             history.push(frame);
         }
+        previous_sequence = command.sequence;
         previous_buttons = command.buttons;
     }
 
@@ -715,6 +771,8 @@ fn update_local_presentation_from_prediction(
 
         presentation_transform.translation =
             prediction_transform.translation + correction.presentation_offset;
-        presentation_transform.rotation = prediction_transform.rotation;
+        // Rotation is owned by the game's animation layer, which faces the model
+        // toward the run direction (CharacterLook.yaw). The KCC transform stays at
+        // identity, so syncing it here would stomp that facing every frame.
     }
 }

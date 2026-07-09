@@ -1,8 +1,5 @@
-//! The Source-style movement context: one user command in, one KCC step out.
-//!
-//! [`NetAhoyStepper`] is the single movement code path. Client prediction,
-//! client replay after a misprediction, and server command consumption all go
-//! through [`NetAhoyStepper::pmove`], so they cannot drift apart.
+//! The movement context: one user command in, one movement step out.
+//! Prediction, replay, and the server all go through [`NetAhoyStepper::player_move`].
 
 use avian3d::prelude::*;
 use bevy::{
@@ -12,28 +9,15 @@ use bevy::{
 };
 use bevy_ahoy::{CharacterLook, input::AccumulatedInput, prelude::*};
 
-use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState};
+use crate::math::LagCompensationHistory;
+use crate::protocol::{AhoyButtons, AhoySnapshot, AhoyUserCmd, NetAhoyMoveState, PlayerId};
+use crate::player::{step_player_state, NetAhoyPlayerState, NetAhoyPlayerEvents};
 
-/// Schedule that Ahoy's own per-tick systems are parked in. Netcode steps the
-/// KCC manually through [`NetAhoyStepper`]; add [`NetAhoyKccRunnerPlugin`] only
-/// if you want Ahoy to also run automatically every fixed tick.
+/// Where Ahoy's own per-tick systems sit. Netcode steps by hand via
+/// [`NetAhoyStepper`], so this schedule is never run unless the game runs it
+/// itself — pass it to `AhoyPlugins::new` to keep Ahoy out of the fixed loop.
 #[derive(ScheduleLabel, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NetAhoyKccSchedule;
-
-pub struct NetAhoyKccRunnerPlugin;
-
-impl Plugin for NetAhoyKccRunnerPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_systems(
-            FixedPostUpdate,
-            run_net_ahoy_kcc_schedule.before(PhysicsSystems::First),
-        );
-    }
-}
-
-fn run_net_ahoy_kcc_schedule(world: &mut World) {
-    world.run_schedule(NetAhoyKccSchedule);
-}
 
 /// Everything the client needs to rewind to (and resimulate from) one
 /// predicted command.
@@ -46,6 +30,7 @@ pub struct AhoyPredictionFrame {
     pub state: NetAhoyMoveState,
     pub controller_state: CharacterControllerState,
     pub accumulated_input: AccumulatedInput,
+    pub player_state: NetAhoyPlayerState,
 }
 
 #[derive(QueryData)]
@@ -57,17 +42,11 @@ pub struct PmoveParts {
     position: &'static mut Position,
     velocity: &'static mut LinearVelocity,
     state: &'static mut CharacterControllerState,
+    player_id: &'static PlayerId,
+    player_state: &'static mut NetAhoyPlayerState,
 }
 
-/// The movement context. The Bevy dependencies of a KCC step live in here so
-/// callers read like Source's `pmove`:
-///
-/// ```ignore
-/// for command in commands {
-///     stepper.pmove(entity, command, previous_buttons)?;
-///     previous_buttons = command.buttons;
-/// }
-/// ```
+/// The movement context: all the Bevy bits a step needs, so callers stay short.
 #[derive(SystemParam)]
 pub struct NetAhoyStepper<'w, 's> {
     // ParamSet because the Ahoy stepper's internal query also writes
@@ -78,17 +57,28 @@ pub struct NetAhoyStepper<'w, 's> {
         (
             CharacterControllerStepper<'w, 's>,
             Query<'w, 's, PmoveParts>,
+            SpatialQuery<'w, 's>,
         ),
     >,
     fixed_time: Res<'w, Time<Fixed>>,
+    // The outbox for what step_player_state fires/blasts, on both peers. The
+    // server broadcast-drains it; the client drains it for predicted visuals.
+    player_events: ResMut<'w, NetAhoyPlayerEvents>,
+    // Pose history for the rocket sweep and player push. Both peers keep one:
+    // the server records live poses, the client mirrors received snapshots.
+    poses: Res<'w, LagCompensationHistory>,
 }
 
 impl NetAhoyStepper<'_, '_> {
-    /// Run one user command through one KCC movement step for `entity`.
-    pub fn pmove(
+    /// Run one command through one movement step for one player. The infamous Quake `pmove`.
+    /// `previous_sequence`/`previous_buttons` come from the last command actually
+    /// stepped — the gap they leave against `command.sequence` is swept for
+    /// rocket hits, and button rising edges are judged across it.
+    pub fn player_move(
         &mut self,
         entity: Entity,
         command: AhoyUserCmd,
+        previous_sequence: u32,
         previous_buttons: AhoyButtons,
     ) -> Result<()> {
         let fixed_delta = self.fixed_time.timestep();
@@ -107,6 +97,52 @@ impl NetAhoyStepper<'_, '_> {
         let mut players = self.set.p1();
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
+
+        self.player_think(entity, &command, previous_sequence, previous_buttons)
+    }
+
+    /// Step the game POD after the KCC step, so client replay and the server
+    /// compose identically. `step_player_state` needs [`SpatialQuery`] (p2) alongside
+    /// the POD and velocity (p1), which can't be borrowed at once, so we take
+    /// the POD out and copy velocity, run it, then write both back.
+    fn player_think(
+        &mut self,
+        entity: Entity,
+        command: &AhoyUserCmd,
+        previous_sequence: u32,
+        previous_buttons: AhoyButtons,
+    ) -> Result<()> {
+        let (mut player_state, position, look, mut velocity, owner) = {
+            let mut players = self.set.p1();
+            let parts = players.get_mut(entity)?;
+            (
+                *parts.player_state,
+                parts.transform.translation,
+                Vec2::new(parts.look.yaw, parts.look.pitch),
+                parts.velocity.0,
+                *parts.player_id,
+            )
+        };
+
+        let spatial = self.set.p2();
+        step_player_state(
+            &mut player_state,
+            &mut self.player_events,
+            owner,
+            command,
+            previous_sequence,
+            previous_buttons,
+            position,
+            look,
+            &spatial,
+            &self.poses,
+            &mut velocity,
+        );
+
+        let mut players = self.set.p1();
+        let mut parts = players.get_mut(entity)?;
+        parts.velocity.0 = velocity;
+        *parts.player_state = player_state;
         Ok(())
     }
 
@@ -122,16 +158,17 @@ impl NetAhoyStepper<'_, '_> {
             state: NetAhoyMoveState::from_controller_state(&parts.state),
             controller_state: parts.state.clone(),
             accumulated_input: parts.input.clone(),
+            player_state: *parts.player_state,
         })
     }
 
     /// Rewind `entity` to an authoritative snapshot, reusing the locally
-    /// recorded controller/input state for that tick when available.
+    /// recorded controller/input/state for that tick when available.
     pub fn restore(
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &NetAhoyPlayerState)>,
     ) {
         let mut players = self.set.p1();
         let Ok(mut parts) = players.get_mut(entity) else {
@@ -144,15 +181,20 @@ impl NetAhoyStepper<'_, '_> {
         parts.look.yaw = snapshot.look.x;
         parts.look.pitch = snapshot.look.y;
 
-        if let Some((stored_state, stored_input)) = local_state {
+        if let Some((stored_state, stored_input, stored_player_state)) = local_state {
             *parts.state = stored_state.clone();
             *parts.input = stored_input.clone();
+            *parts.player_state = *stored_player_state;
         } else {
             *parts.state = CharacterControllerState::default();
             *parts.input = AccumulatedInput::default();
+            *parts.player_state = NetAhoyPlayerState::default();
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
+        // Server truth stomps whatever the frame (or default) held; replay
+        // re-fires only the rockets from commands after the ack.
+        *parts.player_state = snapshot.player_state;
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {
@@ -203,22 +245,27 @@ fn apply_usercmd(
     previous_buttons: AhoyButtons,
 ) {
     input.last_movement = Some(command.movement.clamp_length_max(1.0));
-    input.swim_up = command.buttons.swim_up;
-    input.crouched = command.buttons.crouch;
+    input.swim_up = command.buttons.contains(AhoyButtons::SWIM_UP);
+    input.crouched = command.buttons.contains(AhoyButtons::CROUCH);
 
-    if command.buttons.jump && !previous_buttons.jump {
+    // Ahoy's normal input observers fire held Jump every frame. Preserve that
+    // here so holding Space can auto-bhop through usercmds.
+    if command.buttons.contains(AhoyButtons::JUMP) {
         input.jumped = Some(Stopwatch::new());
     }
-    if command.buttons.tac && !previous_buttons.tac {
+
+    // Bits set this command but not last = rising edges.
+    let pressed = command.buttons - previous_buttons;
+    if pressed.contains(AhoyButtons::TAC) {
         input.tac = Some(Stopwatch::new());
     }
-    if command.buttons.crane && !previous_buttons.crane {
+    if pressed.contains(AhoyButtons::CRANE) {
         input.craned = Some(Stopwatch::new());
     }
-    if command.buttons.mantle && !previous_buttons.mantle {
+    if pressed.contains(AhoyButtons::MANTLE) {
         input.mantled = Some(Stopwatch::new());
     }
-    if command.buttons.climbdown && !previous_buttons.climbdown {
+    if pressed.contains(AhoyButtons::CLIMBDOWN) {
         input.climbdown = Some(Stopwatch::new());
     }
 

@@ -110,7 +110,7 @@ fn process_shot(
         .clamp_ticks(min_rewind_tick, tick.0);
 
     let hit = history
-        .raycast_capsules_at_time(LagCompensatedCapsuleCast {
+        .raycast_hitboxes_at_time(LagCompensatedCast {
             server_time: sample_time,
             origin: shot.origin,
             direction: shot.direction,
@@ -212,7 +212,7 @@ fn predicted_hit_scan(
         .iter()
         .filter(|(visual, _)| Some(visual.player_id.0) != local_player_id)
         .filter_map(|(visual, transform)| {
-            let distance = ray_capsule_distance(
+            let distance = ray_hitbox_distance(
                 origin,
                 direction,
                 HITSCAN_MAX_DISTANCE,

@@ -4,19 +4,21 @@
 
 use avian3d::prelude::*;
 use bevy::{prelude::*, state::app::StatesPlugin};
-use bevy_ahoy::prelude::*;
+use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_netahoy::{
-    DebugTimeScale, FIXED_TIMESTEP_HZ, NetAhoyProtocolPlugin, apply_debug_time_scale,
+    apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetAhoyPlayerState,
+    NetworkedPlayer, PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer,
+    FIXED_TIMESTEP_HZ, PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
-use ahoy_replicon::{HitScanAck, HitScanShot};
+use ahoy_replicon::{
+    BoardVehicle, Driver, HitScanAck, HitScanShot, Vehicle, VehicleRocketFired, VehicleState,
+};
 
-pub const WORLD_COLLISION_LAYER: LayerMask = LayerMask(1 << 0);
-pub const PLAYER_COLLISION_LAYER: LayerMask = LayerMask(1 << 1);
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
 pub const FLYING_TARGET_PLAYER_ID: u64 = 9_001;
-
+pub const WALKING_TARGET_PLAYER_ID: u64 = 9_002;
 pub struct ExampleSharedPlugin;
 
 impl Plugin for ExampleSharedPlugin {
@@ -28,19 +30,19 @@ impl Plugin for ExampleSharedPlugin {
         app.insert_resource(Time::<Fixed>::from_hz(FIXED_TIMESTEP_HZ))
             .init_resource::<DebugTimeScale>()
             .add_plugins((RepliconPlugins, NetAhoyProtocolPlugin))
-            // What's the best channel? Ordered, Unreliable, something else?
-            // On web browsers, it's all ReliableOrdered anyway, due to having
-            // only one IO layer and TCP head of line blocking. Only difference
-            // is that with Unordered, you skip replicons own ordering apparatus.
-            // As of 2026.
-            // For UDP? I'd prefer Reliable for this specific example, however
-            // it would still suck compared to having "fire" be an input inside
-            // the UserCmd struct itself, like in Quake. Since Reliable here
-            // with UDP would delay until rtt before retransmitting. UserCmds 
-            // get beamed every tick. For UDP, I'd extend UserCmd itself with
-            // a "fire" button and whatnot
-            .add_client_event::<HitScanShot>(Channel::Unordered) 
+            // On web it's all ReliableOrdered anyway (one IO layer, TCP), so the
+            // channel barely matters here. Over UDP, prefer a fire button in UserCmd.
+            .add_client_event::<HitScanShot>(Channel::Unordered)
             .add_server_event::<HitScanAck>(Channel::Unordered)
+            // Vehicles: markers replicate down; boarding and the owner's
+            // simulated pose stream up. Pose loss is fine (next tick supersedes).
+            .replicate::<Vehicle>()
+            .replicate::<Driver>()
+            .add_client_event::<BoardVehicle>(Channel::Ordered)
+            .add_client_event::<VehicleState>(Channel::Unreliable)
+            // Fired by the driver, relayed by the server to everyone.
+            .add_client_event::<VehicleRocketFired>(Channel::Ordered)
+            .add_server_event::<VehicleRocketFired>(Channel::Ordered)
             .add_systems(Startup, apply_debug_time_scale);
     }
 }
@@ -54,8 +56,28 @@ pub struct WorldBox {
     pub color: Color,
 }
 
-pub fn world_boxes() -> [WorldBox; 6] {
+pub fn world_boxes() -> [WorldBox; 8] {
     [
+        // Too tall to land on with a jump (apex ~jump_height 1.8m < 2.4m top),
+        // but jump + crane (reach 1.5m) climbs the face and mantle (hands reach
+        // ~1.0m) pulls over the lip. Run at it, jump, hold Space.
+        WorldBox {
+            name: "crane + mantle block",
+            translation: Vec3::new(4.0, 1.2, 6.0),
+            size: Vec3::new(3.0, 2.4, 2.0),
+            rotation: Quat::IDENTITY,
+            color: Color::srgb(0.28, 0.50, 0.42),
+        },
+        // Tall, long wall to run alongside and tic-tac off of. Approach it
+        // glancing (roughly parallel) while airborne — a head-on angle is
+        // rejected by Ahoy's max_tac_cos.
+        WorldBox {
+            name: "tic tac wall",
+            translation: Vec3::new(10.5, 4.0, 4.0),
+            size: Vec3::new(0.6, 8.0, 12.0),
+            rotation: Quat::IDENTITY,
+            color: Color::srgb(0.50, 0.30, 0.35),
+        },
         WorldBox {
             name: "floor",
             translation: Vec3::new(0.0, -0.2, 0.0),
@@ -103,13 +125,15 @@ pub fn world_boxes() -> [WorldBox; 6] {
 
 pub fn spawn_world_colliders(commands: &mut Commands) {
     for world_box in world_boxes() {
+        let transform = Transform {
+            translation: world_box.translation,
+            rotation: world_box.rotation,
+            ..default()
+        };
+
         commands.spawn((
             Name::new(world_box.name),
-            Transform {
-                translation: world_box.translation,
-                rotation: world_box.rotation,
-                ..default()
-            },
+            transform,
             RigidBody::Static,
             Collider::cuboid(world_box.size.x, world_box.size.y, world_box.size.z),
             CollisionLayers::new(WORLD_COLLISION_LAYER, LayerMask::ALL),
@@ -146,7 +170,12 @@ pub fn spawn_world_render(
 
 pub fn player_controller() -> CharacterController {
     CharacterController {
-        //    filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
+        // World only — players are NOT solid to each other. A hard wall at
+        // another player's pose mispredicts sharply (the peers disagree on
+        // where that pose is); instead the shared step applies a TF2-style
+        // separation push from lag-comp poses, which predicts cleanly. See
+        // PLAYER_PUSH_SPEED in bevy_netahoy::player.
+        filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
         air_acceleration_hz: 120.0,
         speed: 6.5,
@@ -158,6 +187,34 @@ pub fn player_controller() -> CharacterController {
 
 pub fn player_collision_layers() -> CollisionLayers {
     CollisionLayers::new(PLAYER_COLLISION_LAYER, LayerMask::ALL)
+}
+
+/// Spawn the server-side player entity for `client`. Used on join and when a
+/// driver hops out of a vehicle (with the vehicle's velocity, for momentum).
+pub fn spawn_player(
+    commands: &mut Commands,
+    client: Entity,
+    player_id: u64,
+    position: Vec3,
+    velocity: Vec3,
+) {
+    commands.spawn((
+        Name::new(format!("player {player_id}")),
+        Replicated,
+        NetworkedPlayer,
+        PlayerId(player_id),
+        AhoySnapshot::default(),
+        PlayerOwner(client),
+        ServerCommandBuffer::default(),
+        QueuedUserCmds::default(),
+        NetAhoyPlayerState::default(),
+        CharacterLook::default(),
+        player_controller(),
+        Collider::cylinder(0.45, 1.5),
+        player_collision_layers(),
+        LinearVelocity(velocity),
+        Transform::from_translation(position),
+    ));
 }
 
 pub fn player_spawn_point(player_id: u64) -> Vec3 {

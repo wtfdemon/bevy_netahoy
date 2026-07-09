@@ -5,11 +5,13 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 
-use avian3d::prelude::*;
 use bevy::prelude::*;
 use bevy_ahoy::{MantleState, prelude::*};
 use bevy_replicon::prelude::*;
+use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
+
+use crate::player::{NetAhoyPlayerState, RocketFired, RocketHit};
 
 pub const DEFAULT_PORT: u16 = 5000;
 pub const FIXED_TIMESTEP_HZ: f64 = 20.0;
@@ -27,11 +29,12 @@ impl Plugin for NetAhoyProtocolPlugin {
         app.replicate::<NetworkedPlayer>()
             .replicate::<PlayerId>()
             .replicate::<AhoySnapshot>()
-            .replicate_filtered::<Transform, Without<AhoySnapshot>>()
-            .replicate_filtered::<LinearVelocity, Without<AhoySnapshot>>()
+            .replicate::<BodySnapshot>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
             .add_server_event::<JoinAccepted>(Channel::Ordered)
-            .add_client_event::<AhoyUserCmdPacket>(Channel::Unreliable);
+            .add_client_event::<AhoyUserCmdPacket>(Channel::Unreliable)
+            .add_server_event::<RocketFired>(Channel::Ordered)
+            .add_server_event::<RocketHit>(Channel::Ordered);
     }
 }
 
@@ -49,15 +52,19 @@ pub struct JoinAccepted {
     pub player_id: u64,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
-pub struct AhoyButtons {
-    pub jump: bool,
-    pub crouch: bool,
-    pub tac: bool,
-    pub mantle: bool,
-    pub crane: bool,
-    pub climbdown: bool,
-    pub swim_up: bool,
+bitflags! {
+    /// Buttons for one command. Bits 0..16 are the library's (movement reads them);
+    /// bits 16.. are the game's, carried untouched (e.g. weapon fire via from_bits_retain).
+    #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+    pub struct AhoyButtons: u32 {
+        const JUMP = 1 << 0;
+        const CROUCH = 1 << 1;
+        const TAC = 1 << 2;
+        const MANTLE = 1 << 3;
+        const CRANE = 1 << 4;
+        const CLIMBDOWN = 1 << 5;
+        const SWIM_UP = 1 << 6;
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
@@ -66,6 +73,16 @@ pub struct AhoyUserCmd {
     pub movement: Vec2,
     pub look: Vec2,
     pub buttons: AhoyButtons,
+    /// The remote render time (tick + `seen_alpha`) the client's remote player
+    /// capsules were displayed at when it built this command. The shared step
+    /// sweeps rocket-vs-player at this time via lag-comp history, so both
+    /// peers judge hits against the same poses and the client's prediction
+    /// holds — you hit what you saw.
+    pub seen_server_tick: u64,
+    /// Fraction into the tick after [`Self::seen_server_tick`], straight from
+    /// the interpolation clock. Raw f32 on purpose: both peers sample with the
+    /// exact same bits, so the judgments stay identical.
+    pub seen_alpha: f32,
 }
 
 #[derive(Event, Serialize, Deserialize, Clone, Debug, Default)]
@@ -106,7 +123,7 @@ impl NetAhoyMoveState {
     }
 }
 
-#[derive(Component, Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoySnapshot {
     pub server_tick: u64,
     pub last_processed_sequence: u32,
@@ -115,6 +132,30 @@ pub struct AhoySnapshot {
     pub velocity: Vec3,
     pub look: Vec2,
     pub state: NetAhoyMoveState,
+    /// The server-corrected player POD; whatever the client can't re-derive
+    /// from its own command stream gets stomped over the frame's prediction
+    /// on every restore.
+    pub player_state: NetAhoyPlayerState,
+}
+
+/// [`AhoySnapshot`]'s sibling for plain rigid bodies (vehicles, props): the
+/// authoritative pose + velocities as one atomic, tick-stamped sample. This is
+/// the *only* thing a non-player mover puts on the wire — never live physics
+/// components, so neither peer's physics engine can fight replication over
+/// them. The server keeps it fresh via `publish_body_snapshots`; a game spawns
+/// the body with `BodySnapshot::default()` and consumes it client-side with
+/// explicitly-owned systems (a tick of 0 means "not yet published").
+///
+/// Velocities ride along because they're the cheapest bytes on the wire:
+/// extrapolation through loss, interpolation tangents, sim seeding on
+/// authority transfer, and blast responses all want them.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct BodySnapshot {
+    pub tick: u64,
+    pub position: Vec3,
+    pub rotation: Quat,
+    pub linear_velocity: Vec3,
+    pub angular_velocity: Vec3,
 }
 
 pub fn sequence_is_newer(incoming: u32, current: u32) -> bool {
