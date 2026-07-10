@@ -83,9 +83,13 @@ impl NetAhoyStepper<'_, '_> {
     ) -> Result<()> {
         let fixed_delta = self.fixed_time.timestep();
 
+        // Where the player stood before this command moves them — the other
+        // end of the sub-tick fire origin lerp in step_player_state.
+        let previous_position;
         {
             let mut players = self.set.p1();
             let mut parts = players.get_mut(entity)?;
+            previous_position = parts.transform.translation;
             tick_input_timers(&mut parts.input, fixed_delta);
             clear_transient_input(&mut parts.input);
             apply_usercmd(&mut parts.input, &mut parts.look, command, previous_buttons);
@@ -98,7 +102,7 @@ impl NetAhoyStepper<'_, '_> {
         let mut parts = players.get_mut(entity)?;
         parts.position.0 = parts.transform.translation;
 
-        self.player_think(entity, &command, previous_sequence, previous_buttons)
+        self.player_think(entity, &command, previous_sequence, previous_position)
     }
 
     /// Step the game POD after the KCC step, so client replay and the server
@@ -110,15 +114,14 @@ impl NetAhoyStepper<'_, '_> {
         entity: Entity,
         command: &AhoyUserCmd,
         previous_sequence: u32,
-        previous_buttons: AhoyButtons,
+        previous_position: Vec3,
     ) -> Result<()> {
-        let (mut player_state, position, look, mut velocity, owner) = {
+        let (mut player_state, position, mut velocity, owner) = {
             let mut players = self.set.p1();
             let parts = players.get_mut(entity)?;
             (
                 *parts.player_state,
                 parts.transform.translation,
-                Vec2::new(parts.look.yaw, parts.look.pitch),
                 parts.velocity.0,
                 *parts.player_id,
             )
@@ -131,9 +134,8 @@ impl NetAhoyStepper<'_, '_> {
             owner,
             command,
             previous_sequence,
-            previous_buttons,
+            previous_position,
             position,
-            look,
             &spatial,
             &self.poses,
             &mut velocity,

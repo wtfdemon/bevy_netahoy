@@ -156,6 +156,19 @@ fn apply_player_commands(
             command.seen_server_tick = seen.tick;
             command.seen_alpha = seen.alpha;
 
+            // Same trust boundary for the fire data: an honest client's values
+            // pass through untouched (so both peers step identical bits); a
+            // doctored command gets clamped or dropped and the client's
+            // prediction eats the snapshot correction.
+            if let Some(fire) = &mut command.fire {
+                if fire.frac.is_finite() && fire.look.x.is_finite() && fire.look.y.is_finite() {
+                    fire.frac = fire.frac.clamp(0.0, 1.0);
+                    fire.look.y = fire.look.y.clamp(-1.5, 1.5);
+                } else {
+                    command.fire = None;
+                }
+            }
+
             if let Err(err) = stepper.player_move(
                 player,
                 command,

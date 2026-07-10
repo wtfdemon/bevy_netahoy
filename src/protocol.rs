@@ -67,12 +67,30 @@ bitflags! {
     }
 }
 
+/// A fire press, sub-tick. `Some` on a command IS the rising edge — sampled
+/// per render frame, so a click can't fall between ticks. Carries no origin:
+/// both peers derive it as `previous_position.lerp(position, frac)`, the same
+/// interpolation the client rendered — derivable data never rides the wire,
+/// so there's nothing for the server to plausibility-check.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct SubtickFire {
+    /// Fraction into the tick window when the click happened, from the fixed
+    /// clock's overstep. Raw f32 on purpose, like `seen_alpha`: both peers
+    /// step the exact same bits.
+    pub frac: f32,
+    /// Look angles at the click, not the tick-boundary sample.
+    pub look: Vec2,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoyUserCmd {
     pub sequence: u32,
     pub movement: Vec2,
     pub look: Vec2,
     pub buttons: AhoyButtons,
+    /// Weapon fire for this command, if the player clicked during its window.
+    /// Postcard makes `None` one byte, so idle commands stay lean.
+    pub fire: Option<SubtickFire>,
     /// The remote render time (tick + `seen_alpha`) the client's remote player
     /// capsules were displayed at when it built this command. The shared step
     /// sweeps rocket-vs-player at this time via lag-comp history, so both

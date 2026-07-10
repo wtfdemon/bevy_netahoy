@@ -112,9 +112,17 @@ impl LocalPlayerId {
 pub struct ClientInput {
     pub movement: Vec2,
     pub look: Vec2,
-    /// Library buttons plus any game-defined bits (e.g. weapon fire) the game
-    /// sets in the high range. The library never interprets the game bits.
+    /// Held state, overwritten by the game every frame. Library buttons plus
+    /// any game-defined bits in the high range; the library never interprets
+    /// the game bits.
     pub buttons: AhoyButtons,
+    /// Press edges, OR-ed in by the game every frame (`just_pressed` bits) and
+    /// drained into the next command — a tap shorter than a tick window still
+    /// lands as one command with the bit set, so no edge is ever lost.
+    pub pressed: AhoyButtons,
+    /// Latched by the game on a fire click ([`SubtickFire`] carries the click's
+    /// sub-tick fraction and exact look); drained into exactly one command.
+    pub fire: Option<SubtickFire>,
 }
 
 #[derive(Resource, Default)]
@@ -561,7 +569,7 @@ fn interpolate_remote_players(
 
 fn drive_prediction_and_send_input(
     mut commands: Commands,
-    input: Res<ClientInput>,
+    mut input: ResMut<ClientInput>,
     clock: Res<ClientServerClock>,
     mut input_state: ResMut<ClientInputState>,
     mut command_history: ResMut<LocalCommandHistory>,
@@ -580,7 +588,10 @@ fn drive_prediction_and_send_input(
         sequence: input_state.next_sequence.wrapping_add(1),
         movement: input.movement.clamp_length_max(1.0),
         look: input.look,
-        buttons: input.buttons,
+        // Held bits plus the press edges accumulated since the last tick, so
+        // sub-tick taps still register on this command.
+        buttons: input.buttons | std::mem::take(&mut input.pressed),
+        fire: input.fire.take(),
         seen_server_tick: seen.tick,
         seen_alpha: seen.alpha,
     };

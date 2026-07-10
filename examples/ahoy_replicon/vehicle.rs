@@ -1112,11 +1112,14 @@ fn fire_vehicle_rockets(
 
     // Reuse the library's closed-form rocket math as a pure value: one raycast
     // fixes the whole path and fuse.
+    // frac 1.0 = fired exactly on the boundary: no sub-tick birth advance,
+    // which is all a per-frame owner-authoritative gun needs.
     let rocket = Rocket::fire(
         PlayerId(local.0.unwrap_or_default()),
         0,
         position.0,
         input.look,
+        1.0,
         &spatial,
     );
     let fired = VehicleRocketFired {

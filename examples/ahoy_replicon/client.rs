@@ -28,6 +28,8 @@ const CAMERA_DISTANCE: f32 = 5.2;
 const CAMERA_HEIGHT: f32 = 0.85;
 const CAMERA_SHOULDER_OFFSET: f32 = 1.25;
 const CAMERA_AIM_RIGHT_OFFSET: f32 = 0.85;
+const AIM_MARKER_SIZE: f32 = 0.22;
+const AIM_MARKER_ALPHA: [f32; 3] = [0.95, 0.45, 0.22];
 
 fn main() -> AppExit {
     let poor_network = poor_network_from_args();
@@ -130,6 +132,11 @@ struct PredictionText;
 #[derive(Component)]
 struct KccStateText;
 
+#[derive(Component)]
+struct FixedAimMarker {
+    slot: usize,
+}
+
 type CameraRigFilter = (
     With<Camera3d>,
     Without<ClientPredictionKcc>,
@@ -179,6 +186,12 @@ impl Plugin for ClientPlugin {
             .add_systems(
                 RunFixedMainLoop,
                 gather_client_input.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
+            )
+            .add_systems(
+                FixedPreUpdate,
+                update_fixed_aim_markers
+                    .after(ClientNetAhoySystems::Predict)
+                    .run_if(in_state(ClientState::Connected)),
             )
             .add_systems(
                 Update,
@@ -274,6 +287,67 @@ fn setup_scene(
         Transform::from_translation(SPAWN_POINT + Vec3::new(0.0, 3.0, 7.0))
             .looking_at(SPAWN_POINT, Vec3::Y),
     ));
+
+    spawn_fixed_aim_markers(&mut commands, &mut meshes, &mut materials);
+}
+
+fn spawn_fixed_aim_markers(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh = meshes.add(Cuboid::new(
+        AIM_MARKER_SIZE,
+        AIM_MARKER_SIZE,
+        AIM_MARKER_SIZE,
+    ));
+
+    for (slot, alpha) in AIM_MARKER_ALPHA.into_iter().enumerate() {
+        commands.spawn((
+            Name::new(format!("fixed aim marker {slot}")),
+            FixedAimMarker { slot },
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.0, 0.0, alpha),
+                emissive: LinearRgba::new(6.0 * alpha, 0.0, 0.0, alpha),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+fn update_fixed_aim_markers(
+    input: Res<ClientInput>,
+    spatial: SpatialQuery,
+    predictions: Query<&Transform, With<ClientPredictionKcc>>,
+    mut markers: Query<
+        (&FixedAimMarker, &mut Transform, &mut Visibility),
+        Without<ClientPredictionKcc>,
+    >,
+    mut history: Local<[Option<Vec3>; 3]>,
+) {
+    let Ok(player) = predictions.single() else {
+        *history = [None; 3];
+        for (_, _, mut visibility) in &mut markers {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
+
+    history.rotate_right(1);
+    history[0] = Some(rocket_explosion_point(player.translation, input.look, &spatial).0);
+
+    for (marker, mut transform, mut visibility) in &mut markers {
+        if let Some(point) = history.get(marker.slot).and_then(|point| *point) {
+            transform.translation = point;
+            *visibility = Visibility::Visible;
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }
 
 fn setup_hud(mut commands: Commands) {
@@ -587,6 +661,7 @@ fn gather_client_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     look: Res<ClientLook>,
+    fixed_time: Res<Time<Fixed>>,
     mut input: ResMut<ClientInput>,
 ) {
     let mut movement = Vec2::ZERO;
@@ -635,6 +710,26 @@ fn gather_client_input(
         mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),
     );
     input.buttons = buttons;
+
+    // Press edges, accumulated per render frame so a tap between ticks still
+    // lands on the next command. Space covers jump/tac/mantle like the held
+    // mapping above.
+    let mut pressed = AhoyButtons::empty();
+    let space = keys.just_pressed(KeyCode::Space);
+    pressed.set(AhoyButtons::JUMP, space);
+    pressed.set(AhoyButtons::TAC, space || keys.just_pressed(KeyCode::ShiftLeft));
+    pressed.set(AhoyButtons::MANTLE, space || keys.just_pressed(KeyCode::KeyE));
+    input.pressed |= pressed;
+
+    // Fire is sub-tick: latch the click with the exact look and how far into
+    // the current tick window it happened; the library drains it into exactly
+    // one command.
+    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::KeyF) {
+        input.fire = Some(SubtickFire {
+            frac: fixed_time.overstep_fraction(),
+            look: Vec2::new(look.yaw, look.pitch),
+        });
+    }
 }
 
 fn update_camera_from_local_presentation(
