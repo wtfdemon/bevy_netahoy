@@ -122,6 +122,9 @@ fn spawn_flying_target(commands: &mut Commands) {
         NetworkedPlayer,
         PlayerId(FLYING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
+        // Owned by nobody: keeps the bot's AhoySnapshot off every client's wire.
+        PlayerOwner(Entity::PLACEHOLDER),
         ServerCommandBuffer::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),
@@ -143,6 +146,9 @@ fn spawn_walking_target(commands: &mut Commands) {
         NetworkedPlayer,
         PlayerId(WALKING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
+        // Owned by nobody: keeps the bot's AhoySnapshot off every client's wire.
+        PlayerOwner(Entity::PLACEHOLDER),
         ServerCommandBuffer::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),

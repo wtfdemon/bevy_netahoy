@@ -33,6 +33,7 @@ impl Plugin for ServerNetAhoyPlugin {
         app.init_resource::<ServerTick>()
             .init_resource::<LagCompensationHistory>()
             .init_resource::<NetAhoyPlayerEvents>()
+            .add_visibility_filter::<PlayerOwner>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
             .add_systems(
@@ -58,9 +59,26 @@ impl Plugin for ServerNetAhoyPlugin {
 #[derive(Resource, Default)]
 pub struct ServerTick(pub u64);
 
-/// Which client connection owns this player entity.
+/// Which client connection owns this player entity. Immutable because it
+/// doubles as the [`VisibilityFilter`] deciding who receives [`AhoySnapshot`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(immutable)]
 pub struct PlayerOwner(pub Entity);
+
+/// Only the owning client receives the reconcile snapshot; everyone else gets
+/// just [`PlayerSnapshot`]. A player with no filter component is UNfiltered
+/// (visible to all), so server bots must carry `PlayerOwner(Entity::PLACEHOLDER)`
+/// — owned by nobody, reconcile data sent to nobody.
+impl VisibilityFilter for PlayerOwner {
+    /// Never present on client entities: visibility is decided purely by
+    /// comparing the owning connection against the client entity itself.
+    type ClientComponent = PlayerOwner;
+    type Scope = SingleComponent<AhoySnapshot>;
+
+    fn is_visible(&self, client: Entity, _: Option<&Self>) -> bool {
+        self.0 == client
+    }
+}
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerCommandBuffer {
@@ -207,18 +225,36 @@ fn publish_authoritative_player_snapshots(
         &CharacterControllerState,
         &NetAhoyPlayerState,
         &mut AhoySnapshot,
+        &mut PlayerSnapshot,
     )>,
 ) {
-    for (command_buffer, position, velocity, look, controller_state, player_state, mut snapshot) in
-        &mut players
+    for (
+        command_buffer,
+        position,
+        velocity,
+        look,
+        controller_state,
+        player_state,
+        mut snapshot,
+        mut player_snapshot,
+    ) in &mut players
     {
-        snapshot.server_tick = tick.0;
+        let sample = RemoteSnapshotSample {
+            server_tick: tick.0,
+            position: **position,
+            velocity: **velocity,
+            look: Vec2::new(look.yaw, look.pitch),
+            state: NetAhoyMoveState::from_controller_state(controller_state),
+        };
+        player_snapshot.0 = sample;
+
+        snapshot.server_tick = sample.server_tick;
         snapshot.last_processed_sequence = command_buffer.last_processed_sequence;
         snapshot.last_processed_buttons = command_buffer.last_buttons;
-        snapshot.position = **position;
-        snapshot.velocity = **velocity;
-        snapshot.look = Vec2::new(look.yaw, look.pitch);
-        snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
+        snapshot.position = sample.position;
+        snapshot.velocity = sample.velocity;
+        snapshot.look = sample.look;
+        snapshot.state = sample.state;
         snapshot.player_state = *player_state;
     }
 }

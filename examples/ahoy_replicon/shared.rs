@@ -7,7 +7,7 @@ use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_netahoy::{
     apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetAhoyPlayerState,
-    NetworkedPlayer, PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer,
+    NetworkedPlayer, PlayerId, PlayerOwner, PlayerSnapshot, QueuedUserCmds, ServerCommandBuffer,
     FIXED_TIMESTEP_HZ, PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
@@ -204,16 +204,19 @@ pub fn spawn_player(
         NetworkedPlayer,
         PlayerId(player_id),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
         PlayerOwner(client),
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),
         player_controller(),
-        Collider::cylinder(0.45, 1.5),
-        player_collision_layers(),
-        LinearVelocity(velocity),
-        Transform::from_translation(position),
+        (
+            Collider::cylinder(0.45, 1.5),
+            player_collision_layers(),
+            LinearVelocity(velocity),
+            Transform::from_translation(position),
+        ),
     ));
 }
 

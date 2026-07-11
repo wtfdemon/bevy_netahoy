@@ -11,6 +11,7 @@ use bevy_replicon::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+use crate::math::RemoteSnapshotSample;
 use crate::player::{NetAhoyPlayerState, RocketFired, RocketHit};
 
 pub const DEFAULT_PORT: u16 = 5000;
@@ -28,6 +29,7 @@ impl Plugin for NetAhoyProtocolPlugin {
     fn build(&self, app: &mut App) {
         app.replicate::<NetworkedPlayer>()
             .replicate::<PlayerId>()
+            .replicate::<PlayerSnapshot>()
             .replicate::<AhoySnapshot>()
             .replicate::<BodySnapshot>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
@@ -141,6 +143,17 @@ impl NetAhoyMoveState {
     }
 }
 
+/// The per-player snapshot every client receives — exactly the subset remote
+/// consumers read (interpolation, the client's lag-comp mirror, the server
+/// clock), nothing else. The wire type IS the sample type the buffers store.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Deref)]
+pub struct PlayerSnapshot(pub RemoteSnapshotSample);
+
+/// The owner-only sibling of [`PlayerSnapshot`]: everything reconciliation
+/// needs (ack sequence, buttons, the full game POD with rockets and weapon).
+/// A `VisibilityFilter` on `PlayerOwner` keeps it off every other client's
+/// wire — remote rockets already travel as [`RocketFired`]/[`RocketHit`]
+/// events, so nobody but the owner ever read this.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoySnapshot {
     pub server_tick: u64,

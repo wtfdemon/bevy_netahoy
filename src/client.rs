@@ -514,7 +514,7 @@ fn cleanup_remote_player_visuals(
 fn update_server_clock(
     time: Res<Time>,
     mut clock: ResMut<ClientServerClock>,
-    snapshots: Query<&AhoySnapshot, Changed<AhoySnapshot>>,
+    snapshots: Query<&PlayerSnapshot, Changed<PlayerSnapshot>>,
 ) {
     for snapshot in &snapshots {
         clock.observe_server_tick(snapshot.server_tick);
@@ -525,15 +525,14 @@ fn update_server_clock(
 fn buffer_remote_snapshots(
     mut history: ResMut<LagCompensationHistory>,
     mut remotes: Query<
-        (&PlayerId, &AhoySnapshot, &mut RemoteInterpolationBuffer),
-        Changed<AhoySnapshot>,
+        (&PlayerId, &PlayerSnapshot, &mut RemoteInterpolationBuffer),
+        Changed<PlayerSnapshot>,
     >,
 ) {
     for (player_id, snapshot, mut buffer) in &mut remotes {
         if snapshot.server_tick != 0 {
-            let sample = RemoteSnapshotSample::from_snapshot(snapshot);
-            buffer.push(sample);
-            history.record(*player_id, sample);
+            buffer.push(snapshot.0);
+            history.record(*player_id, snapshot.0);
         }
     }
 }

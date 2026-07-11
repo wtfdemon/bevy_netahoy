@@ -482,10 +482,10 @@ fn attach_player_meshes(
 
 fn sync_debug_ghosts_from_snapshots(
     mut players: Query<
-        (&AhoySnapshot, &mut Transform, Option<&mut CharacterLook>),
+        (&PlayerSnapshot, &mut Transform, Option<&mut CharacterLook>),
         (
             With<NetworkedPlayer>,
-            Or<(Changed<AhoySnapshot>, Added<Transform>)>,
+            Or<(Changed<PlayerSnapshot>, Added<Transform>)>,
         ),
     >,
 ) {
@@ -568,7 +568,7 @@ fn spawn_remote_player_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     remotes: Query<
-        (Entity, &PlayerId, &Transform, Option<&AhoySnapshot>),
+        (Entity, &PlayerId, &Transform, Option<&PlayerSnapshot>),
         Added<RemoteInterpolationBuffer>,
     >,
     visuals: Query<&RemotePlayerVisual>,

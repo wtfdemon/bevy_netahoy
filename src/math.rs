@@ -7,7 +7,7 @@ use avian3d::prelude::{Collider, Position, Rotation};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{AhoySnapshot, NetAhoyMoveState, PlayerId, FIXED_TIMESTEP_HZ};
+use crate::protocol::{NetAhoyMoveState, PlayerId, FIXED_TIMESTEP_HZ};
 
 pub const LAG_COMPENSATION_HISTORY_CAPACITY: usize = 128;
 
@@ -64,16 +64,6 @@ pub struct RemoteSnapshotSample {
 }
 
 impl RemoteSnapshotSample {
-    pub fn from_snapshot(snapshot: &AhoySnapshot) -> Self {
-        Self {
-            server_tick: snapshot.server_tick,
-            position: snapshot.position,
-            velocity: snapshot.velocity,
-            look: snapshot.look,
-            state: snapshot.state,
-        }
-    }
-
     pub(crate) fn starts_new_motion_segment_after(self, previous: Self) -> bool {
         let tick_gap = self.server_tick.saturating_sub(previous.server_tick);
         tick_gap > REMOTE_INTERPOLATION_DISCONTINUITY_TICKS
