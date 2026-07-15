@@ -51,7 +51,9 @@ impl Plugin for DemoRecordPlugin {
             record_incoming
                 .after(TransportSystems::Poll)
                 .before(ClientTransportSystems::Poll)
-                .run_if(resource_exists::<DemoRecorder>.and(resource_exists::<ClientMessages>)),
+                .run_if(
+                    resource_exists::<DemoRecorder>.and_then(resource_exists::<ClientMessages>),
+                ),
         );
     }
 }
@@ -149,7 +151,9 @@ impl Plugin for DemoPlaybackPlugin {
             PreUpdate,
             playback_inject
                 .in_set(ClientSystems::ReceivePackets)
-                .run_if(resource_exists::<DemoPlayback>.and(in_state(ClientState::Connected))),
+                .run_if(
+                    resource_exists::<DemoPlayback>.and_then(in_state(ClientState::Connected)),
+                ),
         );
     }
 }

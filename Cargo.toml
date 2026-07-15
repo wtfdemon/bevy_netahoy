@@ -10,20 +10,20 @@ readme = "README.md"
 type_complexity = "allow"
 
 [dependencies]
-aeronet = "0.20.0"
-aeronet_replicon = { version = "0.20.0", default-features = false, features = ["client"] }
-avian3d = { version = "0.6.1", default-features = false, features = ["3d", "f32", "parry-f32", "parallel"] }
+aeronet = "0.21.0"
+aeronet_replicon = { version = "0.21.0", default-features = false, features = ["client"] }
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "parallel"] }
 bitflags = { version = "2", features = ["serde"] }
-bevy = { version = "0.18.1", default-features = false, features = ["async_executor", "bevy_log", "bevy_state", "multi_threaded", "serialize"] }
-bevy_ahoy = { git = "https://github.com/smoked-dev/bevy_ahoy.git", branch = "step-entity", default-features = false, features = ["serialize"] }
-bevy_replicon = { version = "0.39.5", default-features = false, features = ["client", "server"] }
+bevy = { version = "0.19", default-features = false, features = ["async_executor", "bevy_log", "bevy_state", "multi_threaded", "serialize"] }
+bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["serialize"] }
+bevy_replicon = { version = "0.41", default-features = false, features = ["client", "server"] }
 serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
-aeronet_replicon = { version = "0.20.0", default-features = false, features = ["client", "server"] }
-aeronet_websocket = { version = "0.20.0", default-features = false, features = ["client", "server"] }
+aeronet_replicon = { version = "0.21.0", default-features = false, features = ["client", "server"] }
+aeronet_websocket = { version = "0.21.0", default-features = false, features = ["client", "server"] }
 ahoy_replicon = { path = "examples/ahoy_replicon" }
-bevy_enhanced_input = "0.24"
+bevy_enhanced_input = "0.26"
 postcard = { version = "1", features = ["alloc"] }
 
 [[example]]

@@ -95,7 +95,7 @@ impl NetAhoyStepper<'_, '_> {
             apply_usercmd(&mut parts.input, &mut parts.look, command, previous_buttons);
         }
 
-        self.set.p0().step_entity(entity, fixed_delta)?;
+        self.set.p0().step_entity(entity, fixed_delta);
 
         // The step writes Transform; Position is what the next step reads.
         let mut players = self.set.p1();

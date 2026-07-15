@@ -558,14 +558,14 @@ pub fn process_rocket_events(
 ) {
     for message in events.fired.drain(..) {
         commands.server_trigger(ToClients {
-            mode: SendMode::Broadcast,
+            targets: SendTargets::All,
             message,
         });
     }
 
     for hit in events.hit.drain(..) {
         commands.server_trigger(ToClients {
-            mode: SendMode::Broadcast,
+            targets: SendTargets::All,
             message: hit,
         });
 
