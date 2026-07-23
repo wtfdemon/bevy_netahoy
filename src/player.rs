@@ -45,7 +45,9 @@ pub const EQUIP_FISTS: AhoyButtons = AhoyButtons::from_bits_retain(1 << 17);
 pub const EQUIP_BAZOOKA: AhoyButtons = AhoyButtons::from_bits_retain(1 << 18);
 
 /// Rocket tuning. Plain consts so client and server share them with no resource.
-const EYE_HEIGHT: f32 = 0.6;
+/// Public so presentation derives the same eye pivot (cameras, aim conversion)
+/// instead of hardcoding its own 0.6.
+pub const EYE_HEIGHT: f32 = 0.6;
 /// Public so presentation can animate flight (`hit_distance / ROCKET_SPEED`).
 //pub const ROCKET_SPEED: f32 = 42.0; // old
 pub const ROCKET_SPEED: f32 = 84.0;

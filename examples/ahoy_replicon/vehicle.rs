@@ -716,7 +716,7 @@ fn relay_vehicle_rockets(
         },
     ));
     commands.server_trigger(ToClients {
-        mode: SendMode::Broadcast,
+        targets: SendTargets::All,
         message,
     });
 }

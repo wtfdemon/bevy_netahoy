@@ -170,7 +170,7 @@ impl NetAhoyStepper<'_, '_> {
         &mut self,
         entity: Entity,
         snapshot: &AhoySnapshot,
-        local_state: Option<(&CharacterControllerState, &AccumulatedInput, &NetAhoyPlayerState)>,
+        local_state: Option<(&CharacterControllerState, &AccumulatedInput)>,
     ) {
         let mut players = self.set.p1();
         let Ok(mut parts) = players.get_mut(entity) else {
@@ -183,19 +183,15 @@ impl NetAhoyStepper<'_, '_> {
         parts.look.yaw = snapshot.look.x;
         parts.look.pitch = snapshot.look.y;
 
-        if let Some((stored_state, stored_input, stored_player_state)) = local_state {
+        if let Some((stored_state, stored_input)) = local_state {
             *parts.state = stored_state.clone();
             *parts.input = stored_input.clone();
-            *parts.player_state = *stored_player_state;
         } else {
             *parts.state = CharacterControllerState::default();
-            *parts.input = AccumulatedInput::default();
-            *parts.player_state = NetAhoyPlayerState::default();
+            *parts.input = AccumulatedInput::default()
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
-        // Server truth stomps whatever the frame (or default) held; replay
-        // re-fires only the rockets from commands after the ack.
         *parts.player_state = snapshot.player_state;
     }
 

@@ -41,6 +41,32 @@ pub struct VehicleRocketFired {
     pub fuse_seconds: f32,
 }
 
+/// Marker: this entity is a pickupable prop (a crate). Replicated so clients
+/// attach colliders and visuals.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct Prop;
+
+/// Present on a prop while a player holds it; replicated so the holder's
+/// client excludes it from KCC prediction and springs its visual to the
+/// camera, and everyone else knows not to expect it to settle.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeldBy(pub u64);
+
+/// Client → server: drive the server-side avian_pickup actor. `Pull` is
+/// held-semantics (sent every frame the grab key is down), `Throw`/`Drop` are
+/// edges.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickupAction {
+    Pull,
+    Throw,
+    Drop,
+}
+
+#[derive(Event, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct PickupInput {
+    pub action: PickupAction,
+}
+
 #[derive(Event, Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct HitScanShot {
     pub shot_id: u32,

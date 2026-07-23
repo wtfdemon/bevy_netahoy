@@ -18,6 +18,7 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
+mod pickup;
 mod rockets;
 mod shared;
 mod vehicle;
@@ -153,6 +154,7 @@ impl Plugin for ClientPlugin {
         hitscan::add_client_hitscan(app);
         rockets::add_client_rockets(app);
         vehicle::add_client_vehicles(app);
+        pickup::add_client_pickup(app);
 
         if let Some(path) = &self.demo.play {
             // Demo playback IS the network backend; no websocket, no session.
@@ -269,7 +271,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             illuminance: 18_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(-6.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),

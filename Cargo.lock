@@ -516,6 +516,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "avian_pickup"
+version = "0.6.0"
+source = "git+https://github.com/alexandre-v1/avian_pickup?branch=bevy-0.19#5c8d42feedae13ed4b71a8e5686fa0ae5d81a5a5"
+dependencies = [
+ "avian3d",
+ "bevy_app",
+ "bevy_ecs",
+ "bevy_log",
+ "bevy_math",
+ "bevy_platform",
+ "bevy_reflect",
+ "bevy_time",
+ "bevy_transform",
+ "bevy_utils",
+ "rand 0.10.2",
+]
+
+[[package]]
 name = "aws-lc-rs"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -569,6 +587,7 @@ dependencies = [
 [[package]]
 name = "bevy_ahoy"
 version = "0.1.0"
+source = "git+https://github.com/smoked-dev/bevy_ahoy.git?branch=step-entity#95e75855dd5493e363c476fa40f2d10c8b59d714"
 dependencies = [
  "avian3d",
  "bevy_app",
@@ -1424,6 +1443,7 @@ dependencies = [
  "aeronet_websocket",
  "ahoy_replicon",
  "avian3d",
+ "avian_pickup",
  "bevy",
  "bevy_ahoy",
  "bevy_enhanced_input",
@@ -2304,6 +2324,17 @@ name = "cfg_aliases"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
+
+[[package]]
+name = "chacha20"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
 
 [[package]]
 name = "chiapos-chacha8"
@@ -3249,6 +3280,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -5204,6 +5236,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
+ "chacha20",
  "getrandom 0.4.2",
  "rand_core 0.10.1",
 ]

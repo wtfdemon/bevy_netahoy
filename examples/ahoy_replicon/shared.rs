@@ -13,7 +13,8 @@ use bevy_netahoy::{
 use bevy_replicon::prelude::*;
 
 use ahoy_replicon::{
-    BoardVehicle, Driver, HitScanAck, HitScanShot, Vehicle, VehicleRocketFired, VehicleState,
+    BoardVehicle, Driver, HeldBy, HitScanAck, HitScanShot, PickupInput, Prop, Vehicle,
+    VehicleRocketFired, VehicleState,
 };
 
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
@@ -43,6 +44,11 @@ impl Plugin for ExampleSharedPlugin {
             // Fired by the driver, relayed by the server to everyone.
             .add_client_event::<VehicleRocketFired>(Channel::Ordered)
             .add_server_event::<VehicleRocketFired>(Channel::Ordered)
+            // Props: markers and held-state replicate down; pickup input
+            // streams up (Pull repeats per frame, so ordering keeps edges sane).
+            .replicate::<Prop>()
+            .replicate::<HeldBy>()
+            .add_client_event::<PickupInput>(Channel::Ordered)
             .add_systems(Startup, apply_debug_time_scale);
     }
 }

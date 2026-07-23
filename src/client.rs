@@ -704,7 +704,6 @@ fn reconcile_local_prediction(
         (
             &ack_frame.controller_state,
             &ack_frame.accumulated_input,
-            &ack_frame.player_state,
         )
     });
 
