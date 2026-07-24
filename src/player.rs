@@ -194,8 +194,8 @@ impl Rocket {
 /// command-driven state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeaponSlot {
-    #[default]
     Fists,
+    #[default]
     Bazooka,
 }
 
@@ -343,9 +343,9 @@ pub fn step_player_state(
     // Weapon timers tick once per command, before the fire gate, so a 16-tick
     // cooldown yields exactly a 16-command refire period.
     let weapon = &mut state.weapon;
-    if command.buttons.contains(EQUIP_FISTS) {
-        weapon.equipped = WeaponSlot::Fists;
-    }
+    // ponytail: fists are demo-disabled — the bazooka is always equipped, so
+    // EQUIP_FISTS is ignored and EQUIP_BAZOOKA is a no-op that stays for the
+    // day a second real weapon shows up.
     if command.buttons.contains(EQUIP_BAZOOKA) {
         weapon.equipped = WeaponSlot::Bazooka;
     }

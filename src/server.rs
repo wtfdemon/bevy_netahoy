@@ -9,7 +9,7 @@ use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_replicon::prelude::*;
 
 use crate::{
-    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample},
+    math::{LagCompensationHistory, RemoteFlags, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
     player::{process_rocket_events, NetAhoyPlayerEvents, NetAhoyPlayerState},
@@ -17,6 +17,10 @@ use crate::{
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
 pub const SERVER_CMD_QUEUE_CAPACITY: usize = 256;
+/// Ticks without a processed usercmd before a player publishes
+/// [`RemoteFlags::CONNECTION_INTERRUPTED`]: 1 s at 20 Hz — long enough that
+/// ordinary loss bursts don't flicker the flag.
+pub const CONNECTION_INTERRUPTED_TICKS: u64 = 20;
 
 #[derive(SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ServerNetAhoySystems {
@@ -84,6 +88,13 @@ impl VisibilityFilter for PlayerOwner {
 pub struct ServerCommandBuffer {
     pub last_processed_sequence: u32,
     pub last_buttons: AhoyButtons,
+    /// Movement-stick magnitude of the last processed command, published in
+    /// [`RemoteSnapshotSample`] so remote viewers can tell a skid from a run.
+    pub last_has_move_input: bool,
+    /// Server tick when a usercmd was last processed; drives
+    /// [`RemoteFlags::CONNECTION_INTERRUPTED`]. Starts at 0, so a fresh player
+    /// reads as interrupted until their first command lands.
+    pub last_command_tick: u64,
 }
 
 #[derive(Component, Clone, Debug)]
@@ -203,6 +214,8 @@ fn apply_player_commands(
                 command_buffer.last_processed_sequence = command.sequence;
             }
             command_buffer.last_buttons = command.buttons;
+            command_buffer.last_has_move_input = command.movement.length() > 0.1;
+            command_buffer.last_command_tick = tick.0;
             processed += 1;
         }
 
@@ -239,12 +252,22 @@ fn publish_authoritative_player_snapshots(
         mut player_snapshot,
     ) in &mut players
     {
+        // Q3's EF_CONNECTION. The KCC only steps per usercmd, so an
+        // interrupted player's position is frozen — publish zero velocity too,
+        // or a stored impulse (rocket knockback waiting for the tab to wake)
+        // turns into oscillating Hermite tangents on every viewer's screen.
+        let interrupted = tick.0.saturating_sub(command_buffer.last_command_tick)
+            > CONNECTION_INTERRUPTED_TICKS;
+        let mut flags = RemoteFlags::empty();
+        flags.set(RemoteFlags::MOVE_INPUT, command_buffer.last_has_move_input);
+        flags.set(RemoteFlags::CONNECTION_INTERRUPTED, interrupted);
         let sample = RemoteSnapshotSample {
             server_tick: tick.0,
             position: **position,
-            velocity: **velocity,
+            velocity: if interrupted { Vec3::ZERO } else { **velocity },
             look: Vec2::new(look.yaw, look.pitch),
             state: NetAhoyMoveState::from_controller_state(controller_state),
+            flags,
         };
         player_snapshot.0 = sample;
 
@@ -310,6 +333,8 @@ fn record_lag_compensation_history(
                 velocity: **velocity,
                 look: Vec2::new(look.yaw, look.pitch),
                 state: NetAhoyMoveState::from_controller_state(state),
+                // Lag-comp poses only rewind hitboxes; flags aren't consulted.
+                flags: RemoteFlags::empty(),
             },
         );
     }

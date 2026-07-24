@@ -183,7 +183,7 @@ pub fn player_controller() -> CharacterController {
         // PLAYER_PUSH_SPEED in bevy_netahoy::player.
         filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
-        air_acceleration_hz: 120.0,
+        air_control: 120.0,
         speed: 6.5,
         gravity: 23.0,
         friction_hz: 4.0,

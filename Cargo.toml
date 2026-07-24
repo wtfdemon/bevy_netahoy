@@ -15,7 +15,7 @@ aeronet_replicon = { version = "0.21.0", default-features = false, features = ["
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "parallel"] }
 bitflags = { version = "2", features = ["serde"] }
 bevy = { version = "0.19", default-features = false, features = ["async_executor", "bevy_log", "bevy_state", "multi_threaded", "serialize"] }
-bevy_ahoy = { git = "https://github.com/smoked-dev/bevy_ahoy.git", branch = "step-entity", default-features = false, features = ["serialize"] }
+bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["serialize"] }
 bevy_replicon = { version = "0.41", default-features = false, features = ["client", "server"] }
 serde = { version = "1.0", features = ["derive"] }
 

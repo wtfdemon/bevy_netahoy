@@ -587,7 +587,6 @@ dependencies = [
 [[package]]
 name = "bevy_ahoy"
 version = "0.1.0"
-source = "git+https://github.com/smoked-dev/bevy_ahoy.git?branch=step-entity#95e75855dd5493e363c476fa40f2d10c8b59d714"
 dependencies = [
  "avian3d",
  "bevy_app",

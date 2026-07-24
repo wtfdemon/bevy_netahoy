@@ -67,6 +67,7 @@ fn print_wire_sizes() {
         velocity: idle.velocity,
         look: idle.look,
         state: idle.state,
+        flags: bevy_netahoy::math::RemoteFlags::MOVE_INPUT,
     }));
 
     let cmd = AhoyUserCmd {

@@ -54,6 +54,22 @@ impl RemoteRenderTime {
     }
 }
 
+bitflags::bitflags! {
+    /// Discrete per-snapshot presentation flags — Q3's eFlags, not pm_flags:
+    /// they ride the wire for viewers and never round-trip into
+    /// `CharacterControllerState` or reconciliation.
+    #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct RemoteFlags: u8 {
+        /// Owner was holding a movement key — presentation can't derive
+        /// "sliding with no input" (skid) from velocity alone.
+        const MOVE_INPUT = 1 << 0;
+        /// No usercmds processed for a while (hidden tab, dying connection).
+        /// Q3's EF_CONNECTION. The published velocity is zeroed while set so
+        /// Hermite tangents and dead-reckoning stay quiet.
+        const CONNECTION_INTERRUPTED = 1 << 1;
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct RemoteSnapshotSample {
     pub server_tick: u64,
@@ -61,6 +77,7 @@ pub struct RemoteSnapshotSample {
     pub velocity: Vec3,
     pub look: Vec2,
     pub state: NetAhoyMoveState,
+    pub flags: RemoteFlags,
 }
 
 impl RemoteSnapshotSample {
@@ -111,6 +128,7 @@ impl RemoteSnapshotSample {
                 self.look.y.lerp(other.look.y, alpha),
             ),
             state: if alpha < 0.5 { self.state } else { other.state },
+            flags: if alpha < 0.5 { self.flags } else { other.flags },
         }
     }
 }
@@ -297,6 +315,7 @@ mod tests {
             velocity,
             look: Vec2::ZERO,
             state: NetAhoyMoveState::default(),
+            flags: RemoteFlags::empty(),
         }
     }
 
