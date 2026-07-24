@@ -40,6 +40,7 @@ impl Plugin for ServerNetAhoyPlugin {
             .add_visibility_filter::<PlayerOwner>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
+            .add_systems(Update, log_cmd_cadence)
             .add_systems(
                 FixedPreUpdate,
                 (
@@ -84,10 +85,30 @@ impl VisibilityFilter for PlayerOwner {
     }
 }
 
+/// Per-tick usercmd consumption histogram: how many ticks consumed 0, 1, 2,
+/// or 3+ commands. A healthy client is all 1s; 0s and 2s in equal measure are
+/// arrival jitter printing plateaus and double-steps into the published
+/// timeline (the "remote player rubber bands" signature).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CmdCadence {
+    pub ticks: [u32; 4],
+}
+
+impl CmdCadence {
+    pub fn irregular(&self) -> u32 {
+        self.ticks[0] + self.ticks[2] + self.ticks[3]
+    }
+
+    pub fn active(&self) -> u32 {
+        self.ticks[1] + self.ticks[2] + self.ticks[3]
+    }
+}
+
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerCommandBuffer {
     pub last_processed_sequence: u32,
     pub last_buttons: AhoyButtons,
+    pub cadence: CmdCadence,
     /// Movement-stick magnitude of the last processed command, published in
     /// [`RemoteSnapshotSample`] so remote viewers can tell a skid from a run.
     pub last_has_move_input: bool,
@@ -170,7 +191,21 @@ fn apply_player_commands(
     for (player, mut command_buffer, mut queued) in &mut players {
         let mut processed = 0;
 
-        while processed < SERVER_USERCMD_BUDGET_PER_PLAYER {
+        // De-jitter: consume ONE command per tick in the steady state, so
+        // transport arrival jitter (QUIC pacing, TCP retransmit bursts) never
+        // prints plateaus/double-steps into the published position timeline.
+        // The queue self-primes a one-command reserve after the first starve,
+        // which then absorbs ±1 tick of jitter at the cost of 1 tick of
+        // server-side input delay — invisible under client prediction. Bigger
+        // backlogs (tab wake, burst delivery) drain gently at 2, floods at
+        // the full budget.
+        let tick_budget = match queued.commands.len() {
+            0..=2 => 1,
+            3..=8 => 2,
+            _ => SERVER_USERCMD_BUDGET_PER_PLAYER,
+        };
+
+        while processed < tick_budget {
             let Some(mut command) = queued.pop_next() else {
                 stepper.clear_transient(player);
                 break;
@@ -219,6 +254,8 @@ fn apply_player_commands(
             processed += 1;
         }
 
+        command_buffer.cadence.ticks[processed.min(3)] += 1;
+
         if processed == SERVER_USERCMD_BUDGET_PER_PLAYER && !queued.commands.is_empty() {
             debug!(
                 "server usercmd budget hit for {player}: {} queued",
@@ -226,6 +263,37 @@ fn apply_player_commands(
             );
         }
     }
+}
+
+/// Every 30 s, log players whose command cadence was irregular — the direct
+/// evidence for (or against) transport-induced rubber banding.
+fn log_cmd_cadence(
+    time: Res<Time>,
+    mut window: Local<f32>,
+    mut players: Query<(&PlayerId, &mut ServerCommandBuffer)>,
+) {
+    *window += time.delta_secs();
+    if *window < 30.0 {
+        return;
+    }
+
+    for (player_id, mut command_buffer) in &mut players {
+        let cadence = command_buffer.cadence;
+        // Skip idle players (all zeros) and perfectly steady ones.
+        if cadence.active() > 0 && cadence.irregular() > 0 {
+            info!(
+                "player {} cmd cadence, last {:.0}s: 0x{} 1x{} 2x{} 3+x{}",
+                player_id.0,
+                *window,
+                cadence.ticks[0],
+                cadence.ticks[1],
+                cadence.ticks[2],
+                cadence.ticks[3],
+            );
+        }
+        command_buffer.cadence = CmdCadence::default();
+    }
+    *window = 0.0;
 }
 
 fn publish_authoritative_player_snapshots(
