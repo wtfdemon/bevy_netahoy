@@ -18,6 +18,9 @@ Prediction and reconciliation:
 
 - Client prediction with rewind + replay, 256-frame history, inputs sent
   with 8-command redundancy so packet loss doesn't drop keystrokes.
+- Server-side input de-jitter, Overwatch/Rocket League style: one command
+  per tick, and a self-priming one-command reserve eats arrival jitter
+  before it prints into the timeline. Paced, never fabricated, never dropped.
 - Corrections you don't see: sub-3.5cm errors are accepted as-is, the rest
   smooth in through a separate presentation entity, and only misses past
   2.25m hard-snap. This is most of "smooth in a browser".
@@ -26,45 +29,40 @@ Prediction and reconciliation:
 
 Sub-tick and lag compensation:
 
-- Fire clicks latch the fixed-clock overstep fraction and exact look angles;
-  the muzzle pose is re-derived identically on both peers, so a shot lands
-  where the barrel was mid-tick, not where the tick started.
+- Fire clicks latch the fixed-clock overstep fraction and exact look angles,
+  so a shot lands where the barrel was mid-tick, not where the tick started.
 - "You hit what you saw": commands carry the interpolated time your screen
-  showed, both peers sample the same pose history, and the server clamps
-  claims to the rewind window so honest values pass through bit-identical.
-  Even on a 144hz monitor at a 20hz tickrate, the server can reproduce
-  where the other players were on your screen when you clicked.
-- Predicted rockets are closed-form (position is a pure function of elapsed
-  ticks), sweep the whole gap since the last command so they can't tunnel
-  through players across lost packets, and self-knockback predicts, so
-  rocket jumps feel instant.
-- TF2-style player separation. Rigid-body player collisions desync (where
-  the client thinks players are vs where the server does), which is why most
-  arena shooters just let players clip through each other. Instead, each
-  player pushes themselves away from players they intersect. Deterministic
-  thanks to the lag-comp history, so it predicts rollback-free. And you can
-  push other players around like this, which is fun.
+  showed, both peers sample the same pose history. Even at 144hz on a 20hz
+  tickrate, the server reproduces your exact screen at the click.
+- Predicted rockets are closed-form and sweep the whole gap since the last
+  command, so they can't tunnel across lost packets. Self-knockback
+  predicts: rocket jumps feel instant.
+- TF2-style player separation: rigid-body player collisions desync, so each
+  player pushes themselves away from intersecting players instead.
+  Deterministic via the lag-comp history, so it predicts rollback-free. And
+  you can shove people, which is fun.
 
 Remote players:
 
 - Cubic Hermite interpolation with snapshot velocities as tangents: a 20hz
   jump arc renders as an arc, not chords. Falls back to lerp across gaps.
-- Capped extrapolation (0.25s of dead-reckoning, then hold), teleport
-  detection, and a smoothed server clock with bounded catch-up.
+- Capped extrapolation (0.25s, then hold), teleport detection, and a
+  rate-servo'd server clock, so snapshot jitter and clock drift never
+  render as stalls, crawls, or time snaps.
 
 The rest:
 
-- Interest management: the heavy reconcile snapshot goes only to its owner,
-  everyone else gets the lean subset. Change-only body snapshots, so parked
-  props go silent on the wire.
+- Interest management: the heavy reconcile snapshot goes only to its owner.
+  Change-only body snapshots, so parked props go silent on the wire.
 - Source-style demos: recording taps the raw replicon byte stream, playback
   is a fake network backend the unmodified client runs against. Speed,
   pause, spectator cam.
 - A deterministic seeded network conditioner (`--poor-net` is the video
-  above), slow-mo, F3 server-truth ghosts, and a wire-size regression test.
+  above), cmd cadence and clock stats in the logs, slow-mo, F3 server-truth
+  ghosts, a wire-size regression test.
 - The example game: lag-compensated hitscan with predicted-vs-acked hit
-  markers, the owner-authoritative buggy, gravity-gun pickup with predicted
-  grab/hold/throw, wasm/WebSocket transport, and a movement showcase map.
+  markers, an owner-authoritative buggy, predicted gravity-gun
+  grab/hold/throw, wasm transport, and a movement showcase map.
 
 ## Architecture
 
