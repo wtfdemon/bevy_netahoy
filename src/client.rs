@@ -128,6 +128,11 @@ pub struct ClientInput {
     /// drained into the next command — a tap shorter than a tick window still
     /// lands as one command with the bit set, so no edge is ever lost.
     pub pressed: AhoyButtons,
+    /// Movement latch, the same idea for held direction keys: the game writes
+    /// the last non-zero `movement` here every frame, drained into the next
+    /// command. Without it `movement` is a point-sample on tick frames only —
+    /// a tap that starts and ends between ticks would never move the player.
+    pub tap_movement: Vec2,
     /// Latched by the game on a fire click ([`SubtickFire`] carries the click's
     /// sub-tick fraction and exact look); drained into exactly one command.
     pub fire: Option<SubtickFire>,
@@ -643,9 +648,17 @@ fn drive_prediction_and_send_input(
     // player is actually aiming at. It rides the command so the shared step
     // samples the same poses on both peers.
     let seen = clock.target_time().unwrap_or_default();
+    // Drain the tap latch every tick; it only decides the command when the
+    // held state is zero (key already released by the tick frame).
+    let tap_movement = std::mem::take(&mut input.tap_movement);
+    let movement = if input.movement != Vec2::ZERO {
+        input.movement
+    } else {
+        tap_movement
+    };
     let command = AhoyUserCmd {
         sequence: input_state.next_sequence.wrapping_add(1),
-        movement: input.movement.clamp_length_max(1.0),
+        movement: movement.clamp_length_max(1.0),
         look: input.look,
         // Held bits plus the press edges accumulated since the last tick, so
         // sub-tick taps still register on this command.
