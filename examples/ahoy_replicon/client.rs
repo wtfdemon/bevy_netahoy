@@ -122,9 +122,6 @@ struct RemoteGhostDebug {
 }
 
 #[derive(Component)]
-struct SpeedText;
-
-#[derive(Component)]
 struct StatusText;
 
 #[derive(Component)]
@@ -204,7 +201,6 @@ impl Plugin for ClientPlugin {
                     spawn_remote_player_visuals,
                     toggle_remote_ghost_debug,
                     update_camera_from_local_presentation,
-                    update_speed_text,
                     update_status_text,
                     update_kcc_state_text,
                     update_prediction_text,
@@ -389,17 +385,26 @@ fn setup_hud(mut commands: Commands) {
         KccStateText,
     ));
 
+    // ponytail: static text, no system — the bindings never change at runtime
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
-            bottom: px(56.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
+            bottom: px(16.0),
+            left: px(16.0),
             ..default()
         },
-        Text::new("0.000"),
-        TextColor(Color::WHITE.with_alpha(0.55)),
-        SpeedText,
+        Text::new(concat!(
+            "wasd    move (auto-bunnyhop)\n",
+            "space   jump / tac    shift  tac\n",
+            "e       mantle        z      climb down\n",
+            "ctrl/c  crouch\n",
+            "lmb     hitscan       rmb/f  fire rocket\n",
+            "q       grab          t      throw\n",
+            "g       enter/exit car        r  reset car\n",
+            "f3      server ghosts esc    release cursor",
+        )),
+        TextFont::from_font_size(13.0),
+        TextColor(Color::WHITE.with_alpha(0.4)),
     ));
 
     commands
@@ -778,21 +783,6 @@ fn update_camera_from_local_presentation(
         + right * CAMERA_SHOULDER_OFFSET
         + Vec3::Y * CAMERA_HEIGHT;
     camera.look_at(camera_target, Vec3::Y);
-}
-
-fn update_speed_text(
-    mut text: Single<&mut Text, With<SpeedText>>,
-    sim_velocity: Option<Single<&LinearVelocity, With<vehicle::LocalVehicleSim>>>,
-    predicted_velocity: Option<Single<&LinearVelocity, With<ClientPredictionKcc>>>,
-    server_velocity: Option<Single<&LinearVelocity, With<ServerTruthGhost>>>,
-) {
-    if let Some(velocity) = sim_velocity {
-        text.0 = format!("driving {:.3}", velocity.xz().length());
-    } else if let Some(velocity) = predicted_velocity {
-        text.0 = format!("predicted {:.3}", velocity.xz().length());
-    } else if let Some(velocity) = server_velocity {
-        text.0 = format!("{:.3}", velocity.xz().length());
-    }
 }
 
 fn demo_playback_controls(keys: Res<ButtonInput<KeyCode>>, mut playback: ResMut<DemoPlayback>) {
