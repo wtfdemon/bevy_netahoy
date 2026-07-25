@@ -109,6 +109,9 @@ pub struct ServerCommandBuffer {
     pub last_processed_sequence: u32,
     pub last_buttons: AhoyButtons,
     pub cadence: CmdCadence,
+    /// De-jitter reserve established: set once the queue first fills to two
+    /// commands at join, after which consumption is paced at one per tick.
+    pub primed: bool,
     /// Movement-stick magnitude of the last processed command, published in
     /// [`RemoteSnapshotSample`] so remote viewers can tell a skid from a run.
     pub last_has_move_input: bool,
@@ -183,12 +186,39 @@ fn queue_player_commands(
 
 fn apply_player_commands(
     tick: Res<ServerTick>,
-    mut players: Query<(Entity, &mut ServerCommandBuffer, &mut QueuedUserCmds), With<PlayerOwner>>,
+    mut players: Query<(
+        Entity,
+        &PlayerOwner,
+        &mut ServerCommandBuffer,
+        &mut QueuedUserCmds,
+    )>,
     mut stepper: NetAhoyStepper,
 ) {
     let min_rewind_tick = tick.0.saturating_sub(crate::math::LAG_COMPENSATION_HISTORY_CAPACITY as u64);
 
-    for (player, mut command_buffer, mut queued) in &mut players {
+    for (player, owner, mut command_buffer, mut queued) in &mut players {
+
+
+        // Prime the reserve at join instead of on the first starve: hold the
+        // first command one tick while the queue fills to two, so the
+        // standing reserve exists before anyone watches this player move. A
+        // demo's first impression shouldn't be the one starve that
+        // self-priming would have let through. Server-driven bots
+        // (PLACEHOLDER owner) feed their queue locally with zero jitter and
+        // would deadlock waiting for depth two, so they skip priming.
+        // !!! CONTROVERSIAL !!!
+        // Adds a tick of input delay to server command processing. More latency, 
+        // but less rubber-banding for other players on your screen. Movement 
+        // unaffected thanks to prediction, however events like kills,
+        // explosions, etc, come at an additional 50ms delay at 20hz. 
+        if !command_buffer.primed && owner.0 != Entity::PLACEHOLDER {
+            if queued.commands.len() < 2 {
+                stepper.clear_transient(player);
+                continue;
+            }
+            command_buffer.primed = true;
+        }
+
         let mut processed = 0;
 
         // De-jitter: consume ONE command per tick in the steady state, so

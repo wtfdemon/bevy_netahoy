@@ -19,8 +19,9 @@ Prediction and reconciliation:
 - Client prediction with rewind + replay, 256-frame history, inputs sent
   with 8-command redundancy so packet loss doesn't drop keystrokes.
 - Server-side input de-jitter, Overwatch/Rocket League style: one command
-  per tick, and a self-priming one-command reserve eats arrival jitter
-  before it prints into the timeline. Paced, never fabricated, never dropped.
+  per tick, and a one-command reserve primed at join eats arrival jitter
+  before it ever prints into the timeline. Paced, never fabricated, never
+  dropped.
 - Corrections you don't see: sub-3.5cm errors are accepted as-is, the rest
   smooth in through a separate presentation entity, and only misses past
   2.25m hard-snap. This is most of "smooth in a browser".
