@@ -1,9 +1,9 @@
 # bevy_netahoy
 
-The meant-to-fork performance-critical prediction & rollback library for Bevy movement shooters,
+The meant-to-be-forked prediction & rollback library for Bevy movement shooters,
 stealing the best of Quake 3 and Source. Strafe jumping, bhopping, surfing,
 sub-tick lag-compensated hitscan and rockets, rocket jumps. Predicted,
-replayed, reconciled, smooth in a web browser.
+replayed, reconciled, and smooth in a web browser.
 
 Built on [bevy_ahoy](https://github.com/janhohenheim/bevy_ahoy) and Avian 3D's
 [`move_and_slide`](https://github.com/avianphysics/avian/pull/894).
