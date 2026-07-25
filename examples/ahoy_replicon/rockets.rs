@@ -249,7 +249,7 @@ fn flash_blast_victims(
             continue;
         }
 
-        let Some(material) = materials.get_mut(&material.0) else {
+        let Some(mut material) = materials.get_mut(&material.0) else {
             continue;
         };
         if let Some(mut flash) = flash {
@@ -274,7 +274,7 @@ fn update_damage_flashes(
     for (entity, mut flash, material) in &mut flashes {
         flash.timer.tick(time.delta());
         if flash.timer.is_finished() {
-            if let Some(material) = materials.get_mut(&material.0) {
+            if let Some(mut material) = materials.get_mut(&material.0) {
                 material.base_color = flash.original;
             }
             commands.entity(entity).remove::<DamageFlash>();

@@ -8,7 +8,10 @@ use bevy_replicon::prelude::*;
 
 use crate::{
     demo::DemoPlayback,
-    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample, sample_buffer_at},
+    math::{
+        LagCompensationHistory, REMOTE_EXTRAPOLATION_SECONDS, RemoteRenderTime,
+        RemoteSnapshotSample, sample_buffer_at,
+    },
     step::{AhoyPredictionFrame, NetAhoyStepper},
     protocol::*,
     player::{NetAhoyPlayerEvents, NetAhoyPlayerState},
@@ -19,8 +22,13 @@ pub const PREDICTION_HISTORY_CAPACITY: usize = 256;
 pub const REMOTE_INTERPOLATION_CAPACITY: usize = 64;
 /// 4 ticks = 200 ms at 20 Hz. Two ticks of headroom over the minimum pair to
 /// interpolate between; capped extrapolation covers the gaps loss opens up.
-pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 2;
+pub const REMOTE_INTERPOLATION_DELAY_TICKS: u64 = 3;
 pub const REMOTE_CLOCK_MAX_CATCHUP_RATE: f64 = 0.10;
+/// Proportional gain of the render-clock rate servo: rate = 1 - error * gain.
+/// 2.0/s means a 50 ms error changes playback speed by 10% (the clamp), and
+/// errors decay with a ~0.5 s time constant — fast enough to track clock
+/// drift and arrival jitter, slow enough to be invisible.
+pub const REMOTE_CLOCK_SERVO_GAIN: f64 = 2.0;
 pub const IGNORE_XZ_ERROR: f32 = 0.035;
 pub const IGNORE_GROUNDED_Y_ERROR: f32 = 0.20;
 pub const SNAP_ERROR_DISTANCE: f32 = 2.25;
@@ -112,9 +120,22 @@ impl LocalPlayerId {
 pub struct ClientInput {
     pub movement: Vec2,
     pub look: Vec2,
-    /// Library buttons plus any game-defined bits (e.g. weapon fire) the game
-    /// sets in the high range. The library never interprets the game bits.
+    /// Held state, overwritten by the game every frame. Library buttons plus
+    /// any game-defined bits in the high range; the library never interprets
+    /// the game bits.
     pub buttons: AhoyButtons,
+    /// Press edges, OR-ed in by the game every frame (`just_pressed` bits) and
+    /// drained into the next command — a tap shorter than a tick window still
+    /// lands as one command with the bit set, so no edge is ever lost.
+    pub pressed: AhoyButtons,
+    /// Movement latch, the same idea for held direction keys: the game writes
+    /// the last non-zero `movement` here every frame, drained into the next
+    /// command. Without it `movement` is a point-sample on tick frames only —
+    /// a tap that starts and ends between ticks would never move the player.
+    pub tap_movement: Vec2,
+    /// Latched by the game on a fire click ([`SubtickFire`] carries the click's
+    /// sub-tick fraction and exact look); drained into exactly one command.
+    pub fire: Option<SubtickFire>,
 }
 
 #[derive(Resource, Default)]
@@ -317,11 +338,32 @@ impl RemoteInterpolationBuffer {
     }
 }
 
+/// Diagnostics for the remote render clock, logged periodically so field
+/// reports ("remotes wobble sometimes") can be attributed to loss vs snaps
+/// vs render hitches instead of guessed at.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RemoteClockStats {
+    /// Clock fell more than the interp delay behind and jumped forward.
+    pub snaps: u32,
+    /// Frames rendered past the newest snapshot (dead-reckoned): late/lost
+    /// head packets that would have been stalls before extrapolation.
+    pub extrapolated_frames: u32,
+    /// Extrapolated frames that hit the hard cap and held position.
+    pub capped_frames: u32,
+}
+
+impl RemoteClockStats {
+    pub fn any(self) -> bool {
+        self.snaps > 0 || self.extrapolated_frames > 0 || self.capped_frames > 0
+    }
+}
+
 #[derive(Resource, Debug)]
 pub struct ClientServerClock {
     pub latest_server_tick: u64,
     pub tick_hz: f64,
     pub interpolation_delay_seconds: f64,
+    pub stats: RemoteClockStats,
     render_server_time_seconds: f64,
     initialized: bool,
 }
@@ -333,6 +375,7 @@ impl Default for ClientServerClock {
             tick_hz: FIXED_TIMESTEP_HZ,
             interpolation_delay_seconds: REMOTE_INTERPOLATION_DELAY_TICKS as f64
                 / FIXED_TIMESTEP_HZ,
+            stats: RemoteClockStats::default(),
             render_server_time_seconds: 0.0,
             initialized: false,
         }
@@ -358,25 +401,40 @@ impl ClientServerClock {
         }
 
         let latest_renderable = self.latest_renderable_server_time_seconds();
-        if self.render_server_time_seconds >= latest_renderable {
+        // Positive: rendering ahead of the arrival stream; negative: behind.
+        let error = self.render_server_time_seconds - latest_renderable;
+
+        // Genuinely far behind (hidden tab, long outage): jump rather than
+        // spend seconds crawling through stale motion.
+        if -error > self.interpolation_delay_seconds.max(1.0 / self.tick_hz) {
             self.render_server_time_seconds = latest_renderable;
+            self.stats.snaps += 1;
             return;
         }
 
-        let seconds_behind = latest_renderable - self.render_server_time_seconds;
-        if seconds_behind > self.interpolation_delay_seconds.max(1.0 / self.tick_hz) {
-            self.render_server_time_seconds = latest_renderable;
-            return;
-        }
+        // Rate servo. A hard clamp prints arrival jitter to the screen as
+        // stall-then-crawl; a free-running clock drifts against the server's
+        // (different oscillators) until it parks at the extrapolation cap.
+        // Instead, nudge playback speed a few percent toward zero error so the
+        // clock breathes with the arrival stream. Late heads still render as
+        // capped dead-reckoning (`sample_buffer_at`) instead of freezing.
+        let rate = (1.0 - error * REMOTE_CLOCK_SERVO_GAIN).clamp(
+            1.0 - REMOTE_CLOCK_MAX_CATCHUP_RATE,
+            1.0 + REMOTE_CLOCK_MAX_CATCHUP_RATE,
+        );
+        let max_render_time = latest_renderable + f64::from(REMOTE_EXTRAPOLATION_SECONDS);
+        let next = (self.render_server_time_seconds + delta_seconds.max(0.0) * rate)
+            .min(max_render_time);
 
-        let catchup_rate = if seconds_behind > 1.0 / self.tick_hz {
-            1.0 + REMOTE_CLOCK_MAX_CATCHUP_RATE
-        } else {
-            1.0
-        };
-        self.render_server_time_seconds = (self.render_server_time_seconds
-            + delta_seconds.max(0.0) * catchup_rate)
-            .min(latest_renderable);
+        // Dead-reckoning frames: rendering past the newest sample we hold.
+        let newest_sample_seconds = self.latest_server_tick as f64 / self.tick_hz;
+        if next > newest_sample_seconds {
+            self.stats.extrapolated_frames += 1;
+            if next >= max_render_time {
+                self.stats.capped_frames += 1;
+            }
+        }
+        self.render_server_time_seconds = next;
     }
 
     pub fn target_time(&self) -> Option<RemoteRenderTime> {
@@ -506,26 +564,40 @@ fn cleanup_remote_player_visuals(
 fn update_server_clock(
     time: Res<Time>,
     mut clock: ResMut<ClientServerClock>,
-    snapshots: Query<&AhoySnapshot, Changed<AhoySnapshot>>,
+    snapshots: Query<&PlayerSnapshot, Changed<PlayerSnapshot>>,
+    mut window: Local<f32>,
 ) {
     for snapshot in &snapshots {
         clock.observe_server_tick(snapshot.server_tick);
     }
     clock.advance(time.delta_secs_f64());
+
+    // Attribute wobble reports to real events instead of vibes.
+    *window += time.delta_secs();
+    if *window >= 30.0 {
+        let stats = clock.stats;
+        if stats.any() {
+            info!(
+                "remote clock, last {:.0}s: {} extrapolated frames ({} capped), {} snaps",
+                *window, stats.extrapolated_frames, stats.capped_frames, stats.snaps,
+            );
+        }
+        clock.stats = RemoteClockStats::default();
+        *window = 0.0;
+    }
 }
 
 fn buffer_remote_snapshots(
     mut history: ResMut<LagCompensationHistory>,
     mut remotes: Query<
-        (&PlayerId, &AhoySnapshot, &mut RemoteInterpolationBuffer),
-        Changed<AhoySnapshot>,
+        (&PlayerId, &PlayerSnapshot, &mut RemoteInterpolationBuffer),
+        Changed<PlayerSnapshot>,
     >,
 ) {
     for (player_id, snapshot, mut buffer) in &mut remotes {
         if snapshot.server_tick != 0 {
-            let sample = RemoteSnapshotSample::from_snapshot(snapshot);
-            buffer.push(sample);
-            history.record(*player_id, sample);
+            buffer.push(snapshot.0);
+            history.record(*player_id, snapshot.0);
         }
     }
 }
@@ -561,7 +633,7 @@ fn interpolate_remote_players(
 
 fn drive_prediction_and_send_input(
     mut commands: Commands,
-    input: Res<ClientInput>,
+    mut input: ResMut<ClientInput>,
     clock: Res<ClientServerClock>,
     mut input_state: ResMut<ClientInputState>,
     mut command_history: ResMut<LocalCommandHistory>,
@@ -576,11 +648,22 @@ fn drive_prediction_and_send_input(
     // player is actually aiming at. It rides the command so the shared step
     // samples the same poses on both peers.
     let seen = clock.target_time().unwrap_or_default();
+    // Drain the tap latch every tick; it only decides the command when the
+    // held state is zero (key already released by the tick frame).
+    let tap_movement = std::mem::take(&mut input.tap_movement);
+    let movement = if input.movement != Vec2::ZERO {
+        input.movement
+    } else {
+        tap_movement
+    };
     let command = AhoyUserCmd {
         sequence: input_state.next_sequence.wrapping_add(1),
-        movement: input.movement.clamp_length_max(1.0),
+        movement: movement.clamp_length_max(1.0),
         look: input.look,
-        buttons: input.buttons,
+        // Held bits plus the press edges accumulated since the last tick, so
+        // sub-tick taps still register on this command.
+        buttons: input.buttons | std::mem::take(&mut input.pressed),
+        fire: input.fire.take(),
         seen_server_tick: seen.tick,
         seen_alpha: seen.alpha,
     };
@@ -694,7 +777,6 @@ fn reconcile_local_prediction(
         (
             &ack_frame.controller_state,
             &ack_frame.accumulated_input,
-            &ack_frame.player_state,
         )
     });
 
@@ -774,5 +856,88 @@ fn update_local_presentation_from_prediction(
         // Rotation is owned by the game's animation layer, which faces the model
         // toward the run direction (CharacterLook.yaw). The KCC transform stays at
         // identity, so syncing it here would stomp that facing every frame.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clock_at(latest_tick: u64) -> ClientServerClock {
+        let mut clock = ClientServerClock::default();
+        clock.observe_server_tick(latest_tick);
+        clock
+    }
+
+    #[test]
+    fn clock_extrapolates_through_late_head_instead_of_stalling() {
+        let mut clock = clock_at(100);
+        let start = clock.target_time().unwrap().as_ticks_f64();
+
+        // No new snapshots for 400 ms: the clock keeps running (servo slows
+        // it to the floor rate, never freezes) into dead-reckoning past the
+        // newest sample instead of stalling at the clamp.
+        for _ in 0..40 {
+            clock.advance(0.01);
+        }
+        let end = clock.target_time().unwrap().as_ticks_f64();
+        // Floor-rate advance, but never past the extrapolation cap.
+        let floor_rate = 0.4 * (1.0 - REMOTE_CLOCK_MAX_CATCHUP_RATE) * FIXED_TIMESTEP_HZ;
+        let cap = f64::from(REMOTE_EXTRAPOLATION_SECONDS) * FIXED_TIMESTEP_HZ;
+        let min_expected = floor_rate.min(cap);
+        assert!(
+            end - start >= min_expected - 1e-6,
+            "clock should keep advancing: moved {} ticks, expected at least {min_expected}",
+            end - start
+        );
+        assert!(clock.stats.extrapolated_frames > 0);
+        assert_eq!(clock.stats.snaps, 0);
+    }
+
+    #[test]
+    fn clock_extrapolation_is_capped() {
+        let mut clock = clock_at(100);
+        // A full second with no snapshots: overrun must stop at the cap.
+        for _ in 0..100 {
+            clock.advance(0.01);
+        }
+        let latest_renderable =
+            100.0 - REMOTE_INTERPOLATION_DELAY_TICKS as f64;
+        let max = latest_renderable + f64::from(REMOTE_EXTRAPOLATION_SECONDS) * FIXED_TIMESTEP_HZ;
+        let end = clock.target_time().unwrap().as_ticks_f64();
+        assert!(end <= max + 1e-6, "clock overran the cap: {end} > {max}");
+        assert!(clock.stats.capped_frames > 0);
+    }
+
+    #[test]
+    fn clock_snaps_after_long_outage() {
+        let mut clock = clock_at(100);
+        for _ in 0..100 {
+            clock.advance(0.01);
+        }
+        // Outage ends: a burst of fresh snapshots far ahead of the held
+        // render time. The clock jumps instead of crawling.
+        clock.observe_server_tick(140);
+        clock.advance(0.01);
+        assert_eq!(clock.stats.snaps, 1);
+        let expected = 140.0 - REMOTE_INTERPOLATION_DELAY_TICKS as f64;
+        let end = clock.target_time().unwrap().as_ticks_f64();
+        assert!((end - expected).abs() < 0.5, "clock should snap to {expected}, got {end}");
+    }
+
+    #[test]
+    fn clock_catches_up_gently_when_behind() {
+        let mut clock = clock_at(100);
+        // Fall one tick behind (fresh snapshots arrived, clock hasn't moved).
+        clock.observe_server_tick(101);
+        clock.advance(0.1);
+        // The servo runs faster than real time but bounded by the max rate.
+        let advanced = clock.target_time().unwrap().as_ticks_f64()
+            - (100.0 - REMOTE_INTERPOLATION_DELAY_TICKS as f64);
+        let real_time = 0.1 * FIXED_TIMESTEP_HZ;
+        let max_expected = real_time * (1.0 + REMOTE_CLOCK_MAX_CATCHUP_RATE);
+        assert!(advanced > real_time, "behind clock should run fast: {advanced}");
+        assert!(advanced <= max_expected + 1e-6);
+        assert_eq!(clock.stats.snaps, 0);
     }
 }

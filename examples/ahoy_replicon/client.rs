@@ -18,6 +18,7 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
+mod pickup;
 mod rockets;
 mod shared;
 mod vehicle;
@@ -28,6 +29,8 @@ const CAMERA_DISTANCE: f32 = 5.2;
 const CAMERA_HEIGHT: f32 = 0.85;
 const CAMERA_SHOULDER_OFFSET: f32 = 1.25;
 const CAMERA_AIM_RIGHT_OFFSET: f32 = 0.85;
+const AIM_MARKER_SIZE: f32 = 0.22;
+const AIM_MARKER_ALPHA: [f32; 3] = [0.95, 0.45, 0.22];
 
 fn main() -> AppExit {
     let poor_network = poor_network_from_args();
@@ -119,9 +122,6 @@ struct RemoteGhostDebug {
 }
 
 #[derive(Component)]
-struct SpeedText;
-
-#[derive(Component)]
 struct StatusText;
 
 #[derive(Component)]
@@ -129,6 +129,11 @@ struct PredictionText;
 
 #[derive(Component)]
 struct KccStateText;
+
+#[derive(Component)]
+struct FixedAimMarker {
+    slot: usize,
+}
 
 type CameraRigFilter = (
     With<Camera3d>,
@@ -146,6 +151,7 @@ impl Plugin for ClientPlugin {
         hitscan::add_client_hitscan(app);
         rockets::add_client_rockets(app);
         vehicle::add_client_vehicles(app);
+        pickup::add_client_pickup(app);
 
         if let Some(path) = &self.demo.play {
             // Demo playback IS the network backend; no websocket, no session.
@@ -181,6 +187,12 @@ impl Plugin for ClientPlugin {
                 gather_client_input.in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop),
             )
             .add_systems(
+                FixedPreUpdate,
+                update_fixed_aim_markers
+                    .after(ClientNetAhoySystems::Predict)
+                    .run_if(in_state(ClientState::Connected)),
+            )
+            .add_systems(
                 Update,
                 (
                     attach_player_meshes,
@@ -189,7 +201,6 @@ impl Plugin for ClientPlugin {
                     spawn_remote_player_visuals,
                     toggle_remote_ghost_debug,
                     update_camera_from_local_presentation,
-                    update_speed_text,
                     update_status_text,
                     update_kcc_state_text,
                     update_prediction_text,
@@ -256,7 +267,7 @@ fn setup_scene(
     commands.spawn((
         DirectionalLight {
             illuminance: 18_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(-6.0, 12.0, 8.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -274,6 +285,67 @@ fn setup_scene(
         Transform::from_translation(SPAWN_POINT + Vec3::new(0.0, 3.0, 7.0))
             .looking_at(SPAWN_POINT, Vec3::Y),
     ));
+
+    spawn_fixed_aim_markers(&mut commands, &mut meshes, &mut materials);
+}
+
+fn spawn_fixed_aim_markers(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh = meshes.add(Cuboid::new(
+        AIM_MARKER_SIZE,
+        AIM_MARKER_SIZE,
+        AIM_MARKER_SIZE,
+    ));
+
+    for (slot, alpha) in AIM_MARKER_ALPHA.into_iter().enumerate() {
+        commands.spawn((
+            Name::new(format!("fixed aim marker {slot}")),
+            FixedAimMarker { slot },
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 0.0, 0.0, alpha),
+                emissive: LinearRgba::new(6.0 * alpha, 0.0, 0.0, alpha),
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            })),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+    }
+}
+
+fn update_fixed_aim_markers(
+    input: Res<ClientInput>,
+    spatial: SpatialQuery,
+    predictions: Query<&Transform, With<ClientPredictionKcc>>,
+    mut markers: Query<
+        (&FixedAimMarker, &mut Transform, &mut Visibility),
+        Without<ClientPredictionKcc>,
+    >,
+    mut history: Local<[Option<Vec3>; 3]>,
+) {
+    let Ok(player) = predictions.single() else {
+        *history = [None; 3];
+        for (_, _, mut visibility) in &mut markers {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    };
+
+    history.rotate_right(1);
+    history[0] = Some(rocket_explosion_point(player.translation, input.look, &spatial).0);
+
+    for (marker, mut transform, mut visibility) in &mut markers {
+        if let Some(point) = history.get(marker.slot).and_then(|point| *point) {
+            transform.translation = point;
+            *visibility = Visibility::Visible;
+        } else {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }
 
 fn setup_hud(mut commands: Commands) {
@@ -313,17 +385,26 @@ fn setup_hud(mut commands: Commands) {
         KccStateText,
     ));
 
+    // ponytail: static text, no system — the bindings never change at runtime
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
-            bottom: px(56.0),
-            width: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
+            bottom: px(16.0),
+            left: px(16.0),
             ..default()
         },
-        Text::new("0.000"),
-        TextColor(Color::WHITE.with_alpha(0.55)),
-        SpeedText,
+        Text::new(concat!(
+            "wasd    move (auto-bunnyhop)\n",
+            "space   jump / tac    shift  tac\n",
+            "e       mantle        z      climb down\n",
+            "ctrl/c  crouch\n",
+            "lmb     hitscan       rmb/f  fire rocket\n",
+            "q       grab          t      throw\n",
+            "g       enter/exit car        r  reset car\n",
+            "f3      server ghosts esc    release cursor",
+        )),
+        TextFont::from_font_size(13.0),
+        TextColor(Color::WHITE.with_alpha(0.4)),
     ));
 
     commands
@@ -408,10 +489,10 @@ fn attach_player_meshes(
 
 fn sync_debug_ghosts_from_snapshots(
     mut players: Query<
-        (&AhoySnapshot, &mut Transform, Option<&mut CharacterLook>),
+        (&PlayerSnapshot, &mut Transform, Option<&mut CharacterLook>),
         (
             With<NetworkedPlayer>,
-            Or<(Changed<AhoySnapshot>, Added<Transform>)>,
+            Or<(Changed<PlayerSnapshot>, Added<Transform>)>,
         ),
     >,
 ) {
@@ -494,7 +575,7 @@ fn spawn_remote_player_visuals(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     remotes: Query<
-        (Entity, &PlayerId, &Transform, Option<&AhoySnapshot>),
+        (Entity, &PlayerId, &Transform, Option<&PlayerSnapshot>),
         Added<RemoteInterpolationBuffer>,
     >,
     visuals: Query<&RemotePlayerVisual>,
@@ -587,6 +668,7 @@ fn gather_client_input(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     look: Res<ClientLook>,
+    fixed_time: Res<Time<Fixed>>,
     mut input: ResMut<ClientInput>,
 ) {
     let mut movement = Vec2::ZERO;
@@ -635,6 +717,26 @@ fn gather_client_input(
         mouse.pressed(MouseButton::Right) || keys.pressed(KeyCode::KeyF),
     );
     input.buttons = buttons;
+
+    // Press edges, accumulated per render frame so a tap between ticks still
+    // lands on the next command. Space covers jump/tac/mantle like the held
+    // mapping above.
+    let mut pressed = AhoyButtons::empty();
+    let space = keys.just_pressed(KeyCode::Space);
+    pressed.set(AhoyButtons::JUMP, space);
+    pressed.set(AhoyButtons::TAC, space || keys.just_pressed(KeyCode::ShiftLeft));
+    pressed.set(AhoyButtons::MANTLE, space || keys.just_pressed(KeyCode::KeyE));
+    input.pressed |= pressed;
+
+    // Fire is sub-tick: latch the click with the exact look and how far into
+    // the current tick window it happened; the library drains it into exactly
+    // one command.
+    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::KeyF) {
+        input.fire = Some(SubtickFire {
+            frac: fixed_time.overstep_fraction(),
+            look: Vec2::new(look.yaw, look.pitch),
+        });
+    }
 }
 
 fn update_camera_from_local_presentation(
@@ -681,21 +783,6 @@ fn update_camera_from_local_presentation(
         + right * CAMERA_SHOULDER_OFFSET
         + Vec3::Y * CAMERA_HEIGHT;
     camera.look_at(camera_target, Vec3::Y);
-}
-
-fn update_speed_text(
-    mut text: Single<&mut Text, With<SpeedText>>,
-    sim_velocity: Option<Single<&LinearVelocity, With<vehicle::LocalVehicleSim>>>,
-    predicted_velocity: Option<Single<&LinearVelocity, With<ClientPredictionKcc>>>,
-    server_velocity: Option<Single<&LinearVelocity, With<ServerTruthGhost>>>,
-) {
-    if let Some(velocity) = sim_velocity {
-        text.0 = format!("driving {:.3}", velocity.xz().length());
-    } else if let Some(velocity) = predicted_velocity {
-        text.0 = format!("predicted {:.3}", velocity.xz().length());
-    } else if let Some(velocity) = server_velocity {
-        text.0 = format!("{:.3}", velocity.xz().length());
-    }
 }
 
 fn demo_playback_controls(keys: Res<ButtonInput<KeyCode>>, mut playback: ResMut<DemoPlayback>) {

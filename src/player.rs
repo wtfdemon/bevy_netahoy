@@ -35,7 +35,9 @@ use crate::protocol::{
 pub const WORLD_COLLISION_LAYER: LayerMask = LayerMask(1 << 0);
 pub const PLAYER_COLLISION_LAYER: LayerMask = LayerMask(1 << 1);
 
-/// "Fire rocket" bit, in the high range the library leaves for games.
+/// "Attack held" bit, in the high range the library leaves for games. Rockets
+/// fire on [`crate::protocol::SubtickFire`], not this bit — it remains for
+/// held-fire consumers (e.g. the vehicle example's gun).
 pub const ROCKET_FIRE: AhoyButtons = AhoyButtons::from_bits_retain(1 << 16);
 /// Weapon-select bits. Held-state selects (not a toggle edge), so a dropped
 /// command can't strand a switch — the next command repeats the intent.
@@ -43,7 +45,9 @@ pub const EQUIP_FISTS: AhoyButtons = AhoyButtons::from_bits_retain(1 << 17);
 pub const EQUIP_BAZOOKA: AhoyButtons = AhoyButtons::from_bits_retain(1 << 18);
 
 /// Rocket tuning. Plain consts so client and server share them with no resource.
-const EYE_HEIGHT: f32 = 0.6;
+/// Public so presentation derives the same eye pivot (cameras, aim conversion)
+/// instead of hardcoding its own 0.6.
+pub const EYE_HEIGHT: f32 = 0.6;
 /// Public so presentation can animate flight (`hit_distance / ROCKET_SPEED`).
 //pub const ROCKET_SPEED: f32 = 42.0; // old
 pub const ROCKET_SPEED: f32 = 84.0;
@@ -125,30 +129,31 @@ pub struct Rocket {
 impl Rocket {
     /// Raycast the path now and bake the rocket. Deterministic: same inputs +
     /// same static world => same rocket, which is what lets the sides agree.
+    /// `frac` is how far into the birth tick's window the click happened: the
+    /// rocket was already flying for the remaining `1 - frac` of that window,
+    /// so the fuse sheds it. The path keeps its true origin — folding the
+    /// birth advance into the fuse instead of the start point means the first
+    /// real sweep segment still covers the muzzle (no point-blank gap), at the
+    /// cost of in-flight positions interpolating up to one tick early, which
+    /// decays to zero at the impact point.
     pub fn fire(
         owner: PlayerId,
         fired_sequence: u32,
         position: Vec3,
         look: Vec2,
+        frac: f32,
         spatial: &SpatialQuery,
     ) -> Self {
         let (explosion, hit_distance) = rocket_explosion_point(position, look, spatial);
         let start = position + Vec3::Y * EYE_HEIGHT;
         let dir = (explosion - start).normalize_or_zero();
-        // distance / speed = seconds, * HZ = ticks. Rounds to 0 point-blank, so a
-        // shot into a wall detonates the same tick it's fired (the detonation pass
-        // in step_player_state runs right after the rocket is pushed).
-        let fuse_ticks = (hit_distance / ROCKET_SPEED * FIXED_TIMESTEP_HZ as f32).round() as u32;
-        if fuse_ticks == 0 {
-            println!(
-                "Rocket fired at zero fuse: owner={:?} sequence={} pos={:?} look={:?} dist={}",
-                owner,
-                fired_sequence,
-                position,
-                look,
-                hit_distance
-            );
-        }
+        // distance / speed = seconds, * HZ = ticks, minus the slice of the
+        // birth window already flown. Rounds to 0 point-blank, so a shot into
+        // a wall detonates the same tick it's fired (the detonation pass in
+        // step_player_state runs right after the rocket is pushed).
+        let fuse_ticks = (hit_distance / ROCKET_SPEED * FIXED_TIMESTEP_HZ as f32 - (1.0 - frac))
+            .round()
+            .max(0.0) as u32;
         Self { owner, fired_sequence, start, dir, hit_distance, fuse_ticks, direct_hit: None }
     }
 
@@ -189,8 +194,8 @@ impl Rocket {
 /// command-driven state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WeaponSlot {
-    #[default]
     Fists,
+    #[default]
     Bazooka,
 }
 
@@ -313,21 +318,24 @@ pub struct NetAhoyPlayerEvents {
 }
 
 /// Advance one player's POD for one command, inside the movement step.
-/// Fire on the rising edge, sweep rockets against lag-compensated player
-/// poses, blast rockets whose fuse is due, apply self-knockback.
+/// Fire on the command's [`SubtickFire`], sweep rockets against
+/// lag-compensated player poses, blast rockets whose fuse is due, apply
+/// self-knockback.
 ///
 /// `previous_sequence` is the last command stepped before this one; the sweep
 /// covers the whole gap so rockets can't tunnel through victims across lost
-/// commands. `poses` is the pose history both peers keep.
+/// commands. `previous_position` is where the player stood before this
+/// command's movement — the fire origin lerps between it and `position` by
+/// the click's sub-tick fraction, reproducing the pose the player saw.
+/// `poses` is the pose history both peers keep.
 pub fn step_player_state(
     state: &mut NetAhoyPlayerState,
     events: &mut NetAhoyPlayerEvents,
     owner: PlayerId,
     command: &AhoyUserCmd,
     previous_sequence: u32,
-    previous_buttons: AhoyButtons,
+    previous_position: Vec3,
     position: Vec3,
-    look: Vec2,
     spatial: &SpatialQuery,
     poses: &LagCompensationHistory,
     velocity: &mut Vec3,
@@ -335,9 +343,9 @@ pub fn step_player_state(
     // Weapon timers tick once per command, before the fire gate, so a 16-tick
     // cooldown yields exactly a 16-command refire period.
     let weapon = &mut state.weapon;
-    if command.buttons.contains(EQUIP_FISTS) {
-        weapon.equipped = WeaponSlot::Fists;
-    }
+    // ponytail: fists are demo-disabled — the bazooka is always equipped, so
+    // EQUIP_FISTS is ignored and EQUIP_BAZOOKA is a no-op that stays for the
+    // day a second real weapon shows up.
     if command.buttons.contains(EQUIP_BAZOOKA) {
         weapon.equipped = WeaponSlot::Bazooka;
     }
@@ -386,10 +394,9 @@ pub fn step_player_state(
         *velocity += Vec3::new(direction.x, 0.0, direction.y) * strength;
     }
 
-    let firing = command.buttons.contains(ROCKET_FIRE);
-    let was_firing = previous_buttons.contains(ROCKET_FIRE);
-    if firing
-        && !was_firing
+    // `Some` is the press edge itself — no button-history comparison, no
+    // click lost to a press-and-release inside one tick window.
+    if let Some(fire) = command.fire
         && state.weapon.equipped == WeaponSlot::Bazooka
         && state.weapon.cooldown_ticks == 0
         && state.weapon.ammo > 0
@@ -398,7 +405,11 @@ pub fn step_player_state(
         state.weapon.ammo -= 1;
         state.weapon.cooldown_ticks = ROCKET_COOLDOWN_TICKS;
         state.weapon.shots_fired = state.weapon.shots_fired.wrapping_add(1);
-        let rocket = Rocket::fire(owner, command.sequence, position, look, spatial);
+        // The origin the player saw at click time: mid-window between the
+        // last two sim poses, exactly what interpolation rendered. Derived
+        // identically on both peers — never trusted from the wire.
+        let origin = previous_position.lerp(position, fire.frac);
+        let rocket = Rocket::fire(owner, command.sequence, origin, fire.look, fire.frac, spatial);
         state.rockets.push(rocket);
         events.fired.push(rocket.fired_event());
     }
@@ -549,14 +560,14 @@ pub fn process_rocket_events(
 ) {
     for message in events.fired.drain(..) {
         commands.server_trigger(ToClients {
-            mode: SendMode::Broadcast,
+            targets: SendTargets::All,
             message,
         });
     }
 
     for hit in events.hit.drain(..) {
         commands.server_trigger(ToClients {
-            mode: SendMode::Broadcast,
+            targets: SendTargets::All,
             message: hit,
         });
 

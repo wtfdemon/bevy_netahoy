@@ -126,7 +126,7 @@ fn process_shot(
         });
 
     commands.server_trigger(ToClients {
-        mode: SendMode::Direct(ClientId::Client(client)),
+        targets: SendTargets::Single(ClientId::Client(client)),
         message: HitScanAck {
             shot_id: shot.shot_id,
             server_tick: tick.0,

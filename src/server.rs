@@ -9,7 +9,7 @@ use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_replicon::prelude::*;
 
 use crate::{
-    math::{LagCompensationHistory, RemoteRenderTime, RemoteSnapshotSample},
+    math::{LagCompensationHistory, RemoteFlags, RemoteRenderTime, RemoteSnapshotSample},
     step::NetAhoyStepper,
     protocol::*,
     player::{process_rocket_events, NetAhoyPlayerEvents, NetAhoyPlayerState},
@@ -17,6 +17,10 @@ use crate::{
 
 pub const SERVER_USERCMD_BUDGET_PER_PLAYER: usize = 4;
 pub const SERVER_CMD_QUEUE_CAPACITY: usize = 256;
+/// Ticks without a processed usercmd before a player publishes
+/// [`RemoteFlags::CONNECTION_INTERRUPTED`]: 1 s at 20 Hz — long enough that
+/// ordinary loss bursts don't flicker the flag.
+pub const CONNECTION_INTERRUPTED_TICKS: u64 = 20;
 
 #[derive(SystemSet, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum ServerNetAhoySystems {
@@ -33,8 +37,10 @@ impl Plugin for ServerNetAhoyPlugin {
         app.init_resource::<ServerTick>()
             .init_resource::<LagCompensationHistory>()
             .init_resource::<NetAhoyPlayerEvents>()
+            .add_visibility_filter::<PlayerOwner>()
             .add_observer(queue_player_commands)
             .add_systems(FixedFirst, advance_server_tick)
+            .add_systems(Update, log_cmd_cadence)
             .add_systems(
                 FixedPreUpdate,
                 (
@@ -58,14 +64,61 @@ impl Plugin for ServerNetAhoyPlugin {
 #[derive(Resource, Default)]
 pub struct ServerTick(pub u64);
 
-/// Which client connection owns this player entity.
+/// Which client connection owns this player entity. Immutable because it
+/// doubles as the [`VisibilityFilter`] deciding who receives [`AhoySnapshot`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(immutable)]
 pub struct PlayerOwner(pub Entity);
+
+/// Only the owning client receives the reconcile snapshot; everyone else gets
+/// just [`PlayerSnapshot`]. A player with no filter component is UNfiltered
+/// (visible to all), so server bots must carry `PlayerOwner(Entity::PLACEHOLDER)`
+/// — owned by nobody, reconcile data sent to nobody.
+impl VisibilityFilter for PlayerOwner {
+    /// Never present on client entities: visibility is decided purely by
+    /// comparing the owning connection against the client entity itself.
+    type ClientComponent = PlayerOwner;
+    type Scope = SingleComponent<AhoySnapshot>;
+
+    fn is_visible(&self, client: Entity, _: Option<&Self>) -> bool {
+        self.0 == client
+    }
+}
+
+/// Per-tick usercmd consumption histogram: how many ticks consumed 0, 1, 2,
+/// or 3+ commands. A healthy client is all 1s; 0s and 2s in equal measure are
+/// arrival jitter printing plateaus and double-steps into the published
+/// timeline (the "remote player rubber bands" signature).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CmdCadence {
+    pub ticks: [u32; 4],
+}
+
+impl CmdCadence {
+    pub fn irregular(&self) -> u32 {
+        self.ticks[0] + self.ticks[2] + self.ticks[3]
+    }
+
+    pub fn active(&self) -> u32 {
+        self.ticks[1] + self.ticks[2] + self.ticks[3]
+    }
+}
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct ServerCommandBuffer {
     pub last_processed_sequence: u32,
     pub last_buttons: AhoyButtons,
+    pub cadence: CmdCadence,
+    /// De-jitter reserve established: set once the queue first fills to two
+    /// commands at join, after which consumption is paced at one per tick.
+    pub primed: bool,
+    /// Movement-stick magnitude of the last processed command, published in
+    /// [`RemoteSnapshotSample`] so remote viewers can tell a skid from a run.
+    pub last_has_move_input: bool,
+    /// Server tick when a usercmd was last processed; drives
+    /// [`RemoteFlags::CONNECTION_INTERRUPTED`]. Starts at 0, so a fresh player
+    /// reads as interrupted until their first command lands.
+    pub last_command_tick: u64,
 }
 
 #[derive(Component, Clone, Debug)]
@@ -133,15 +186,56 @@ fn queue_player_commands(
 
 fn apply_player_commands(
     tick: Res<ServerTick>,
-    mut players: Query<(Entity, &mut ServerCommandBuffer, &mut QueuedUserCmds), With<PlayerOwner>>,
+    mut players: Query<(
+        Entity,
+        &PlayerOwner,
+        &mut ServerCommandBuffer,
+        &mut QueuedUserCmds,
+    )>,
     mut stepper: NetAhoyStepper,
 ) {
     let min_rewind_tick = tick.0.saturating_sub(crate::math::LAG_COMPENSATION_HISTORY_CAPACITY as u64);
 
-    for (player, mut command_buffer, mut queued) in &mut players {
+    for (player, owner, mut command_buffer, mut queued) in &mut players {
+
+
+        // Prime the reserve at join instead of on the first starve: hold the
+        // first command one tick while the queue fills to two, so the
+        // standing reserve exists before anyone watches this player move. A
+        // demo's first impression shouldn't be the one starve that
+        // self-priming would have let through. Server-driven bots
+        // (PLACEHOLDER owner) feed their queue locally with zero jitter and
+        // would deadlock waiting for depth two, so they skip priming.
+        // !!! CONTROVERSIAL !!!
+        // Adds a tick of input delay to server command processing. More latency, 
+        // but less rubber-banding for other players on your screen. Movement 
+        // unaffected thanks to prediction, however events like kills,
+        // explosions, etc, come at an additional 50ms delay at 20hz. 
+        if !command_buffer.primed && owner.0 != Entity::PLACEHOLDER {
+            if queued.commands.len() < 2 {
+                stepper.clear_transient(player);
+                continue;
+            }
+            command_buffer.primed = true;
+        }
+
         let mut processed = 0;
 
-        while processed < SERVER_USERCMD_BUDGET_PER_PLAYER {
+        // De-jitter: consume ONE command per tick in the steady state, so
+        // transport arrival jitter (QUIC pacing, TCP retransmit bursts) never
+        // prints plateaus/double-steps into the published position timeline.
+        // The queue self-primes a one-command reserve after the first starve,
+        // which then absorbs ±1 tick of jitter at the cost of 1 tick of
+        // server-side input delay — invisible under client prediction. Bigger
+        // backlogs (tab wake, burst delivery) drain gently at 2, floods at
+        // the full budget.
+        let tick_budget = match queued.commands.len() {
+            0..=2 => 1,
+            3..=8 => 2,
+            _ => SERVER_USERCMD_BUDGET_PER_PLAYER,
+        };
+
+        while processed < tick_budget {
             let Some(mut command) = queued.pop_next() else {
                 stepper.clear_transient(player);
                 break;
@@ -155,6 +249,19 @@ fn apply_player_commands(
                 .clamp_ticks(min_rewind_tick, tick.0);
             command.seen_server_tick = seen.tick;
             command.seen_alpha = seen.alpha;
+
+            // Same trust boundary for the fire data: an honest client's values
+            // pass through untouched (so both peers step identical bits); a
+            // doctored command gets clamped or dropped and the client's
+            // prediction eats the snapshot correction.
+            if let Some(fire) = &mut command.fire {
+                if fire.frac.is_finite() && fire.look.x.is_finite() && fire.look.y.is_finite() {
+                    fire.frac = fire.frac.clamp(0.0, 1.0);
+                    fire.look.y = fire.look.y.clamp(-1.5, 1.5);
+                } else {
+                    command.fire = None;
+                }
+            }
 
             if let Err(err) = stepper.player_move(
                 player,
@@ -172,8 +279,12 @@ fn apply_player_commands(
                 command_buffer.last_processed_sequence = command.sequence;
             }
             command_buffer.last_buttons = command.buttons;
+            command_buffer.last_has_move_input = command.movement.length() > 0.1;
+            command_buffer.last_command_tick = tick.0;
             processed += 1;
         }
+
+        command_buffer.cadence.ticks[processed.min(3)] += 1;
 
         if processed == SERVER_USERCMD_BUDGET_PER_PLAYER && !queued.commands.is_empty() {
             debug!(
@@ -182,6 +293,37 @@ fn apply_player_commands(
             );
         }
     }
+}
+
+/// Every 30 s, log players whose command cadence was irregular — the direct
+/// evidence for (or against) transport-induced rubber banding.
+fn log_cmd_cadence(
+    time: Res<Time>,
+    mut window: Local<f32>,
+    mut players: Query<(&PlayerId, &mut ServerCommandBuffer)>,
+) {
+    *window += time.delta_secs();
+    if *window < 30.0 {
+        return;
+    }
+
+    for (player_id, mut command_buffer) in &mut players {
+        let cadence = command_buffer.cadence;
+        // Skip idle players (all zeros) and perfectly steady ones.
+        if cadence.active() > 0 && cadence.irregular() > 0 {
+            info!(
+                "player {} cmd cadence, last {:.0}s: 0x{} 1x{} 2x{} 3+x{}",
+                player_id.0,
+                *window,
+                cadence.ticks[0],
+                cadence.ticks[1],
+                cadence.ticks[2],
+                cadence.ticks[3],
+            );
+        }
+        command_buffer.cadence = CmdCadence::default();
+    }
+    *window = 0.0;
 }
 
 fn publish_authoritative_player_snapshots(
@@ -194,18 +336,46 @@ fn publish_authoritative_player_snapshots(
         &CharacterControllerState,
         &NetAhoyPlayerState,
         &mut AhoySnapshot,
+        &mut PlayerSnapshot,
     )>,
 ) {
-    for (command_buffer, position, velocity, look, controller_state, player_state, mut snapshot) in
-        &mut players
+    for (
+        command_buffer,
+        position,
+        velocity,
+        look,
+        controller_state,
+        player_state,
+        mut snapshot,
+        mut player_snapshot,
+    ) in &mut players
     {
-        snapshot.server_tick = tick.0;
+        // Q3's EF_CONNECTION. The KCC only steps per usercmd, so an
+        // interrupted player's position is frozen — publish zero velocity too,
+        // or a stored impulse (rocket knockback waiting for the tab to wake)
+        // turns into oscillating Hermite tangents on every viewer's screen.
+        let interrupted = tick.0.saturating_sub(command_buffer.last_command_tick)
+            > CONNECTION_INTERRUPTED_TICKS;
+        let mut flags = RemoteFlags::empty();
+        flags.set(RemoteFlags::MOVE_INPUT, command_buffer.last_has_move_input);
+        flags.set(RemoteFlags::CONNECTION_INTERRUPTED, interrupted);
+        let sample = RemoteSnapshotSample {
+            server_tick: tick.0,
+            position: **position,
+            velocity: if interrupted { Vec3::ZERO } else { **velocity },
+            look: Vec2::new(look.yaw, look.pitch),
+            state: NetAhoyMoveState::from_controller_state(controller_state),
+            flags,
+        };
+        player_snapshot.0 = sample;
+
+        snapshot.server_tick = sample.server_tick;
         snapshot.last_processed_sequence = command_buffer.last_processed_sequence;
         snapshot.last_processed_buttons = command_buffer.last_buttons;
-        snapshot.position = **position;
-        snapshot.velocity = **velocity;
-        snapshot.look = Vec2::new(look.yaw, look.pitch);
-        snapshot.state = NetAhoyMoveState::from_controller_state(controller_state);
+        snapshot.position = sample.position;
+        snapshot.velocity = sample.velocity;
+        snapshot.look = sample.look;
+        snapshot.state = sample.state;
         snapshot.player_state = *player_state;
     }
 }
@@ -261,6 +431,8 @@ fn record_lag_compensation_history(
                 velocity: **velocity,
                 look: Vec2::new(look.yaw, look.pitch),
                 state: NetAhoyMoveState::from_controller_state(state),
+                // Lag-comp poses only rewind hitboxes; flags aren't consulted.
+                flags: RemoteFlags::empty(),
             },
         );
     }

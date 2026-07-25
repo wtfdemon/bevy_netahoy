@@ -11,6 +11,7 @@ use bevy_replicon::prelude::*;
 use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 
+use crate::math::RemoteSnapshotSample;
 use crate::player::{NetAhoyPlayerState, RocketFired, RocketHit};
 
 pub const DEFAULT_PORT: u16 = 5000;
@@ -28,6 +29,7 @@ impl Plugin for NetAhoyProtocolPlugin {
     fn build(&self, app: &mut App) {
         app.replicate::<NetworkedPlayer>()
             .replicate::<PlayerId>()
+            .replicate::<PlayerSnapshot>()
             .replicate::<AhoySnapshot>()
             .replicate::<BodySnapshot>()
             .add_client_event::<JoinRequest>(Channel::Ordered)
@@ -67,12 +69,30 @@ bitflags! {
     }
 }
 
+/// A fire press, sub-tick. `Some` on a command IS the rising edge — sampled
+/// per render frame, so a click can't fall between ticks. Carries no origin:
+/// both peers derive it as `previous_position.lerp(position, frac)`, the same
+/// interpolation the client rendered — derivable data never rides the wire,
+/// so there's nothing for the server to plausibility-check.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct SubtickFire {
+    /// Fraction into the tick window when the click happened, from the fixed
+    /// clock's overstep. Raw f32 on purpose, like `seen_alpha`: both peers
+    /// step the exact same bits.
+    pub frac: f32,
+    /// Look angles at the click, not the tick-boundary sample.
+    pub look: Vec2,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoyUserCmd {
     pub sequence: u32,
     pub movement: Vec2,
     pub look: Vec2,
     pub buttons: AhoyButtons,
+    /// Weapon fire for this command, if the player clicked during its window.
+    /// Postcard makes `None` one byte, so idle commands stay lean.
+    pub fire: Option<SubtickFire>,
     /// The remote render time (tick + `seen_alpha`) the client's remote player
     /// capsules were displayed at when it built this command. The shared step
     /// sweeps rocket-vs-player at this time via lag-comp history, so both
@@ -123,6 +143,17 @@ impl NetAhoyMoveState {
     }
 }
 
+/// The per-player snapshot every client receives — exactly the subset remote
+/// consumers read (interpolation, the client's lag-comp mirror, the server
+/// clock), nothing else. The wire type IS the sample type the buffers store.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Deref)]
+pub struct PlayerSnapshot(pub RemoteSnapshotSample);
+
+/// The owner-only sibling of [`PlayerSnapshot`]: everything reconciliation
+/// needs (ack sequence, buttons, the full game POD with rockets and weapon).
+/// A `VisibilityFilter` on `PlayerOwner` keeps it off every other client's
+/// wire — remote rockets already travel as [`RocketFired`]/[`RocketHit`]
+/// events, so nobody but the owner ever read this.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct AhoySnapshot {
     pub server_tick: u64,

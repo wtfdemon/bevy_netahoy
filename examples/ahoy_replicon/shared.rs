@@ -7,13 +7,14 @@ use bevy::{prelude::*, state::app::StatesPlugin};
 use bevy_ahoy::{prelude::*, CharacterLook};
 use bevy_netahoy::{
     apply_debug_time_scale, AhoySnapshot, DebugTimeScale, NetAhoyProtocolPlugin, NetAhoyPlayerState,
-    NetworkedPlayer, PlayerId, PlayerOwner, QueuedUserCmds, ServerCommandBuffer,
+    NetworkedPlayer, PlayerId, PlayerOwner, PlayerSnapshot, QueuedUserCmds, ServerCommandBuffer,
     FIXED_TIMESTEP_HZ, PLAYER_COLLISION_LAYER, WORLD_COLLISION_LAYER,
 };
 use bevy_replicon::prelude::*;
 
 use ahoy_replicon::{
-    BoardVehicle, Driver, HitScanAck, HitScanShot, Vehicle, VehicleRocketFired, VehicleState,
+    BoardVehicle, Driver, HeldBy, HitScanAck, HitScanShot, PickupInput, Prop, Vehicle,
+    VehicleRocketFired, VehicleState,
 };
 
 pub const SPAWN_POINT: Vec3 = Vec3::new(0.0, 2.2, 8.0);
@@ -43,6 +44,11 @@ impl Plugin for ExampleSharedPlugin {
             // Fired by the driver, relayed by the server to everyone.
             .add_client_event::<VehicleRocketFired>(Channel::Ordered)
             .add_server_event::<VehicleRocketFired>(Channel::Ordered)
+            // Props: markers and held-state replicate down; pickup input
+            // streams up (Pull repeats per frame, so ordering keeps edges sane).
+            .replicate::<Prop>()
+            .replicate::<HeldBy>()
+            .add_client_event::<PickupInput>(Channel::Ordered)
             .add_systems(Startup, apply_debug_time_scale);
     }
 }
@@ -177,7 +183,7 @@ pub fn player_controller() -> CharacterController {
         // PLAYER_PUSH_SPEED in bevy_netahoy::player.
         filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
-        air_acceleration_hz: 120.0,
+    //    air_control: 120.0,
         speed: 6.5,
         gravity: 23.0,
         friction_hz: 4.0,
@@ -204,16 +210,19 @@ pub fn spawn_player(
         NetworkedPlayer,
         PlayerId(player_id),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
         PlayerOwner(client),
         ServerCommandBuffer::default(),
         QueuedUserCmds::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),
         player_controller(),
-        Collider::cylinder(0.45, 1.5),
-        player_collision_layers(),
-        LinearVelocity(velocity),
-        Transform::from_translation(position),
+        (
+            Collider::cylinder(0.45, 1.5),
+            player_collision_layers(),
+            LinearVelocity(velocity),
+            Transform::from_translation(position),
+        ),
     ));
 }
 

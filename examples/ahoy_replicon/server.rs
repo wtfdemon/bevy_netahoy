@@ -12,6 +12,7 @@ use bevy_netahoy::*;
 use bevy_replicon::prelude::*;
 
 mod hitscan;
+mod pickup;
 mod rockets;
 mod shared;
 mod vehicle;
@@ -48,6 +49,7 @@ impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         hitscan::add_server_hitscan(app);
         vehicle::add_server_vehicles(app);
+        pickup::add_server_pickup(app);
 
         app.add_plugins((WebSocketServerPlugin, AeronetRepliconServerPlugin))
             .add_observer(join_player)
@@ -74,6 +76,9 @@ fn setup_server(mut commands: Commands) {
     spawn_flying_target(&mut commands);
     spawn_walking_target(&mut commands);
     vehicle::spawn_buggy(&mut commands, Vec3::new(-8.0, 1.5, 10.0));
+    pickup::spawn_prop(&mut commands, Vec3::new(1.5, 0.8, 10.0));
+    pickup::spawn_prop(&mut commands, Vec3::new(2.5, 0.8, 10.5));
+    pickup::spawn_prop(&mut commands, Vec3::new(2.0, 1.6, 10.2));
 
     info!("websocket server listening on {DEFAULT_SERVER_URL}");
 }
@@ -99,7 +104,7 @@ fn join_player(
         .find(|id| !assigned_ids.contains(id))
         .expect("all player IDs exhausted");
     commands.server_trigger(ToClients {
-        mode: SendMode::Direct(ClientId::Client(client)),
+        targets: SendTargets::Single(ClientId::Client(client)),
         message: JoinAccepted { player_id },
     });
 
@@ -122,6 +127,9 @@ fn spawn_flying_target(commands: &mut Commands) {
         NetworkedPlayer,
         PlayerId(FLYING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
+        // Owned by nobody: keeps the bot's AhoySnapshot off every client's wire.
+        PlayerOwner(Entity::PLACEHOLDER),
         ServerCommandBuffer::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),
@@ -143,6 +151,9 @@ fn spawn_walking_target(commands: &mut Commands) {
         NetworkedPlayer,
         PlayerId(WALKING_TARGET_PLAYER_ID),
         AhoySnapshot::default(),
+        PlayerSnapshot::default(),
+        // Owned by nobody: keeps the bot's AhoySnapshot off every client's wire.
+        PlayerOwner(Entity::PLACEHOLDER),
         ServerCommandBuffer::default(),
         NetAhoyPlayerState::default(),
         CharacterLook::default(),
@@ -183,16 +194,13 @@ fn clean_up_disconnected_player(
 
 fn update_scripted_targets(
     tick: Res<ServerTick>,
-    mut targets: Query<
-        (
-            &PlayerId,
-            &mut Position,
-            &mut Transform,
-            &mut LinearVelocity,
-            &mut CharacterLook,
-        ),
-        Without<PlayerOwner>,
-    >,
+    mut targets: Query<(
+        &PlayerId,
+        &mut Position,
+        &mut Transform,
+        &mut LinearVelocity,
+        &mut CharacterLook,
+    )>,
 ) {
     for (player_id, mut physics_position, mut transform, mut velocity_component, mut look) in
         &mut targets
