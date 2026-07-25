@@ -1,9 +1,9 @@
 # bevy_netahoy
 
-The meant-to-fork prediction & rollback library for Bevy movement shooters,
+The meant-to-fork performance-critical prediction & rollback library for Bevy movement shooters,
 stealing the best of Quake 3 and Source. Strafe jumping, bhopping, surfing,
 sub-tick lag-compensated hitscan and rockets, rocket jumps. Predicted,
-replayed, reconciled, and smooth in a web browser.
+replayed, reconciled, smooth in a web browser.
 
 Built on [bevy_ahoy](https://github.com/janhohenheim/bevy_ahoy) and Avian 3D's
 [`move_and_slide`](https://github.com/avianphysics/avian/pull/894).
@@ -18,10 +18,10 @@ Prediction and reconciliation:
 
 - Client prediction with rewind + replay, 256-frame history, inputs sent
   with 8-command redundancy so packet loss doesn't drop keystrokes.
-- Server-side input de-jitter, Overwatch/Rocket League style: one command
-  per tick, and a one-command reserve primed at join eats arrival jitter
-  before it ever prints into the timeline. Paced, never fabricated, never
-  dropped.
+- Server-side input de-jitter, Overwatch[^1]/Rocket League[^2] style: one
+  command per tick, and a one-command reserve primed at join eats arrival
+  jitter before it ever prints into the timeline. Paced, never fabricated,
+  never dropped.
 - Corrections you don't see: sub-3.5cm errors are accepted as-is, the rest
   smooth in through a separate presentation entity, and only misses past
   2.25m hard-snap. This is most of "smooth in a browser".
@@ -213,3 +213,6 @@ cargo run --example ahoy_client
 
 See [examples/README.md](examples/README.md) for the WSL2 native-Windows and
 browser/WebSocket paths.
+
+[^1]: Timothy Ford, [*Overwatch Gameplay Architecture and Netcode*](https://www.gdcvault.com/play/1024001/-Overwatch-Gameplay-Architecture-and), GDC 2017.
+[^2]: Jared Cone, [*It IS Rocket Science! The Physics of Rocket League Detailed*](https://www.gdcvault.com/play/1024972/It-IS-Rocket-Science-The), GDC 2018.
