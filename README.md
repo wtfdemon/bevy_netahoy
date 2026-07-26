@@ -8,9 +8,19 @@ replayed, reconciled, and smooth in a web browser.
 Built on [bevy_ahoy](https://github.com/janhohenheim/bevy_ahoy) and Avian 3D's
 [`move_and_slide`](https://github.com/avianphysics/avian/pull/894).
 
-Prediction under 200 ping, 10% packet loss, at a 20hz tickrate:
+Live demo with two browser windows. Servers hosted in Ashburn, USA, both clients in Berlin, Germany.
+Transatlantic rtt, loss, and jitter, with an additional 1 tick of delay for de-jitter 
+buffering. At 20hz tickrate, amounts to 150ms rtt total. Players look smooth, inputs feel instant.
 
-https://github.com/user-attachments/assets/348c77c7-0479-4286-b2ff-f13a10579a65
+
+
+https://github.com/user-attachments/assets/4a30f002-0c6e-49b0-b40c-2c95c4b4cf2d
+
+
+
+Live at https://demons.wtf
+
+Supporting both UDP/WebTransport and TCP/WebSockets clients simultaneously.
 
 ## Features
 
