@@ -19,6 +19,11 @@ use crate::{
 
 pub const USERCMD_BACKUP_COUNT: usize = 8;
 pub const PREDICTION_HISTORY_CAPACITY: usize = 256;
+/// Rewind+replay bail-out: past ~1.5s of unacked input (20Hz cmds) the replay
+/// itself becomes the problem — hundreds of KCC steps per snapshot balloon
+/// frame time, which delays outgoing cmds and widens the window further (the
+/// death spiral). Cheaper to eat one visible snap and start fresh.
+pub const MAX_REPLAY_COMMANDS: usize = 32;
 pub const REMOTE_INTERPOLATION_CAPACITY: usize = 64;
 /// 4 ticks = 200 ms at 20 Hz. Two ticks of headroom over the minimum pair to
 /// interpolate between; capped extrapolation covers the gaps loss opens up.
@@ -713,7 +718,7 @@ fn reconcile_local_prediction(
     server_players: Query<(&PlayerId, &AhoySnapshot), With<NetworkedPlayer>>,
     mut predictions: Query<(Entity, &ClientPredictionKcc, &mut PredictionCorrection)>,
     mut history: ResMut<PredictionHistory>,
-    command_history: Res<LocalCommandHistory>,
+    mut command_history: ResMut<LocalCommandHistory>,
     mut stepper: NetAhoyStepper,
 ) {
     let Some(local_id) = local.0 else {
@@ -773,6 +778,24 @@ fn reconcile_local_prediction(
     let current_position = stepper.position(predicted_entity).unwrap_or(snapshot.position);
     let old_visible_position = current_position + correction.presentation_offset;
     let replay_commands = command_history.after_sequence(snapshot.last_processed_sequence);
+
+    // Death-spiral bound: don't replay a runaway window — snap to server truth,
+    // drop all pending prediction, and let the next snapshots start clean.
+    if replay_commands.len() > MAX_REPLAY_COMMANDS {
+        stepper.restore(predicted_entity, snapshot, None);
+        history.clear();
+        command_history.commands.clear();
+        correction.mode = CorrectionMode::Snapped;
+        correction.last_server_tick = snapshot.server_tick;
+        correction.last_ack_sequence = snapshot.last_processed_sequence;
+        correction.last_error = history_error
+            .map(|(total_error, _, _, _, _)| total_error)
+            .unwrap_or(0.0);
+        correction.replayed_commands = 0;
+        correction.presentation_offset = Vec3::ZERO;
+        return;
+    }
+
     let local_state = ack_frame.as_ref().map(|ack_frame| {
         (
             &ack_frame.controller_state,
