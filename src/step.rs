@@ -213,9 +213,6 @@ impl NetAhoyStepper<'_, '_> {
 }
 
 fn tick_input_timers(input: &mut AccumulatedInput, delta: std::time::Duration) {
-    if let Some(timer) = input.jumped.as_mut() {
-        timer.tick(delta);
-    }
     if let Some(timer) = input.tac.as_mut() {
         timer.tick(delta);
     }
@@ -234,6 +231,7 @@ fn clear_transient_input(input: &mut AccumulatedInput) {
     input.last_movement = None;
     input.swim_up = false;
     input.crouched = false;
+    input.jump_held = false;
 }
 
 fn apply_usercmd(
@@ -245,12 +243,9 @@ fn apply_usercmd(
     input.last_movement = Some(command.movement.clamp_length_max(1.0));
     input.swim_up = command.buttons.contains(AhoyButtons::SWIM_UP);
     input.crouched = command.buttons.contains(AhoyButtons::CROUCH);
-
-    // Ahoy's normal input observers fire held Jump every frame. Preserve that
-    // here so holding Space can auto-bhop through usercmds.
-    if command.buttons.contains(AhoyButtons::JUMP) {
-        input.jumped = Some(Stopwatch::new());
-    }
+    // Held, not an edge: jump fires iff held at the landing tick (autohop),
+    // and releasing before landing cancels — no press buffer to ghost-hop.
+    input.jump_held = command.buttons.contains(AhoyButtons::JUMP);
 
     // Bits set this command but not last = rising edges.
     let pressed = command.buttons - previous_buttons;
