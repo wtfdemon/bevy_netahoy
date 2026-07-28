@@ -207,6 +207,7 @@ pub enum CorrectionMode {
     Ignored,
     Replayed,
     Snapped,
+    Dropped,
 }
 
 #[derive(Resource)]
@@ -785,7 +786,7 @@ fn reconcile_local_prediction(
         stepper.restore(predicted_entity, snapshot, None);
         history.clear();
         command_history.commands.clear();
-        correction.mode = CorrectionMode::Snapped;
+        correction.mode = CorrectionMode::Dropped;
         correction.last_server_tick = snapshot.server_tick;
         correction.last_ack_sequence = snapshot.last_processed_sequence;
         correction.last_error = history_error
