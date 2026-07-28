@@ -587,7 +587,7 @@ dependencies = [
 [[package]]
 name = "bevy_ahoy"
 version = "0.1.0"
-source = "git+https://github.com/smoked-dev/bevy_ahoy.git?branch=step-entity#95e75855dd5493e363c476fa40f2d10c8b59d714"
+source = "git+https://github.com/wtfdemon/bevy_ahoy.git?branch=easy-strafe#e728b1f1d61cade92adf687709e7a4bab5feca9f"
 dependencies = [
  "avian3d",
  "bevy_app",
@@ -4870,7 +4870,6 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
- "rayon",
  "rstar",
  "serde",
  "serde_arrays",
@@ -4901,7 +4900,6 @@ dependencies = [
  "num-derive",
  "num-traits",
  "ordered-float",
- "rayon",
  "rstar",
  "serde",
  "serde_arrays",
