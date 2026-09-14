@@ -890,14 +890,12 @@ fn update_prediction_text(
         .next_sequence
         .wrapping_sub(prediction.last_ack_sequence);
     text.0 = format!(
-        "prediction: {:?} | error {:.3}m | ack {} | lag {} | replay {} | last rewind {:?} {:.2}m (gate {:.2}m)",
+        "prediction: {:?} | error {:.3}m | ack {} | lag {} | replay {} | offset {:.3}m",
         prediction.mode,
         prediction.last_error,
         prediction.last_ack_sequence,
         ack_lag,
         prediction.replayed_commands,
-        prediction.last_rewind_mode,
-        prediction.last_correction_distance,
-        prediction.last_snap_gate,
+        prediction.presentation_offset.length()
     );
 }
