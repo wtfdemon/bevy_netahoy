@@ -210,3 +210,112 @@ fn condition_session_packets(mut sessions: Query<(&mut Session, &mut NetworkCond
             }));
     }
 }
+
+/// Render-rate C1-continuity probe for remote player visuals.
+///
+/// Samples each remote visual's final rendered translation once per frame
+/// (`Last`, after avian's Hermite easing wrote it) and estimates per-frame
+/// velocity and acceleration. Legit motion through the tick-rate Hermite is
+/// curvature-bounded by |dv_tick| / tick_dt (a 7 m/s landing redirect at
+/// 20 Hz reads as ~140 m/s^2); presentation faults (snaps, cursor pops,
+/// extrapolation reversals) are step discontinuities that read as thousands.
+/// Spikes above the threshold log immediately with clock context; a summary
+/// line prints every 5 s so a quiet run still proves the probe was alive.
+pub struct ContinuityProbePlugin;
+
+/// Above the Hermite-curvature ceiling of legit motion: a hard landing or
+/// rocket redirect renders as up to ~6*|dv|/tick_dt (~2-4k for a 20-30 m/s
+/// redirect at 20 Hz). Only genuine presentation discontinuities exceed this.
+const CONTINUITY_SPIKE_ACCEL: f32 = 5000.0;
+/// Ignore sub-frame noise: a spike must also be a real velocity step.
+const CONTINUITY_SPIKE_DV: f32 = 0.5;
+const CONTINUITY_SUMMARY_SECONDS: f32 = 5.0;
+
+#[derive(Resource, Default)]
+struct ContinuityProbeState {
+    tracks: bevy::platform::collections::HashMap<Entity, (Vec3, Vec3)>,
+    window_seconds: f32,
+    window_frames: u32,
+    window_spikes: u32,
+    window_max_accel: f32,
+}
+
+impl Plugin for ContinuityProbePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ContinuityProbeState>()
+            .add_systems(Last, probe_remote_continuity);
+    }
+}
+
+fn probe_remote_continuity(
+    time: Res<Time>,
+    fixed_time: Res<Time<Fixed>>,
+    mut clock: ResMut<crate::ClientServerClock>,
+    remotes: Query<
+        (Entity, &Transform, &crate::RemotePlaybackStatus),
+        With<crate::RemotePlayerVisual>,
+    >,
+    mut state: ResMut<ContinuityProbeState>,
+) {
+    let dt = time.delta_secs();
+    if dt <= f32::EPSILON {
+        return;
+    }
+
+    let mut live = bevy::ecs::entity::EntityHashSet::default();
+    for (entity, transform, status) in &remotes {
+        live.insert(entity);
+        let pos = transform.translation;
+        let Some((prev_pos, prev_vel)) = state.tracks.get(&entity).copied() else {
+            state.tracks.insert(entity, (pos, Vec3::ZERO));
+            continue;
+        };
+        let vel = (pos - prev_pos) / dt;
+        let dv = vel - prev_vel;
+        let accel = dv.length() / dt;
+        state.window_frames += 1;
+        state.window_max_accel = state.window_max_accel.max(accel);
+        if accel > CONTINUITY_SPIKE_ACCEL && dv.length() > CONTINUITY_SPIKE_DV {
+            state.window_spikes += 1;
+            info!(
+                "continuity spike {entity}: |dv| {:.2} m/s accel {:.0} m/s^2 dt {:.1}ms alpha {:.3} pos {:.3?} extrap {} frozen {} clock lag {:.2}",
+                dv.length(),
+                accel,
+                dt * 1000.0,
+                fixed_time.overstep_fraction(),
+                pos,
+                status.extrapolating,
+                status.frozen,
+                clock
+                    .target_time()
+                    .map(|t| {
+                        (clock.latest_server_tick as f64
+                            - clock.interpolation_delay_seconds * clock.tick_hz)
+                            - t.as_ticks_f64()
+                    })
+                    .unwrap_or(0.0),
+            );
+        }
+        state.tracks.insert(entity, (pos, vel));
+    }
+    state.tracks.retain(|entity, _| live.contains(entity));
+
+    state.window_seconds += dt;
+    if state.window_seconds >= CONTINUITY_SUMMARY_SECONDS && state.window_frames > 0 {
+        info!(
+            "continuity summary: {} remote-frames, {} spikes, max accel {:.0} m/s^2 over {:.1}s | snaps {} extrap-frames {} head-jump-max {}",
+            state.window_frames,
+            state.window_spikes,
+            state.window_max_accel,
+            state.window_seconds,
+            clock.stats.snaps,
+            clock.stats.extrapolated_frames,
+            clock.stats.head_jump_max,
+        );
+        clock.stats.head_jump_max = 0;
+        state.window_seconds = 0.0;
+        state.window_frames = 0;
+        state.window_spikes = 0;
+        state.window_max_accel = 0.0;
+    }
+}

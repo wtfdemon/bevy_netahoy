@@ -176,11 +176,10 @@ pub fn spawn_world_render(
 
 pub fn player_controller() -> CharacterController {
     CharacterController {
-        // World only — players are NOT solid to each other. A hard wall at
-        // another player's pose mispredicts sharply (the peers disagree on
-        // where that pose is); instead the shared step applies a TF2-style
-        // separation push from lag-comp poses, which predicts cleanly. See
-        // PLAYER_PUSH_SPEED in bevy_netahoy::player.
+        // World only — players are NOT in each other's collision filter.
+        // Contact is the shared step's velocity-space clip + depenetration
+        // from lag-comp poses, which predicts cleanly. See
+        // PLAYER_SEPARATION_BETA in bevy_netahoy::player.
         filter: SpatialQueryFilter::from_mask(WORLD_COLLISION_LAYER),
         acceleration_hz: 10.0,
     //    air_control: 120.0,

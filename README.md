@@ -9,8 +9,7 @@ Built on [bevy_ahoy](https://github.com/janhohenheim/bevy_ahoy) and Avian 3D's
 [`move_and_slide`](https://github.com/avianphysics/avian/pull/894).
 
 Live demo with two browser windows. Servers hosted in Ashburn, USA, both clients in Berlin, Germany.
-Transatlantic rtt, loss, and jitter, with an additional 1 tick of delay for de-jitter 
-buffering. At 20hz tickrate, amounts to 150ms rtt total. Players look smooth, inputs feel instant.
+Transatlantic rtt, loss, and jitter. Players look smooth, inputs feel instant.
 
 
 
@@ -20,21 +19,36 @@ https://github.com/user-attachments/assets/4a30f002-0c6e-49b0-b40c-2c95c4b4cf2d
 
 Live at https://demons.wtf
 
-Supporting both UDP/WebTransport and TCP/WebSockets clients simultaneously.
+**WebSocket only, by measurement.** Chrome's WebTransport runs mandatory QUIC
+congestion control over its datagrams ([RFC 9221 §5](https://www.rfc-editor.org/rfc/rfc9221.html)):
+under real-world loss it *withholds* your "unreliable" packets in a send queue
+instead of dropping them, starving the server of fresh input and forcing
+rollbacks. TCP's retransmit delay, by contrast, is exactly what the
+prediction/de-jitter stack absorbs. A/B tested under packet-level abuse in the
+same browser, and reproduced deterministically in `tests/link_sim.rs` —
+WebSocket won decisively. Not advised to re-enable WebTransport without
+re-reading that test.
 
 ## Features
 
 Prediction and reconciliation:
 
-- Client prediction with rewind + replay, 256-frame history, inputs sent
-  with 8-command redundancy so packet loss doesn't drop keystrokes.
-- Server-side input de-jitter, Overwatch[^1]/Rocket League[^2] style: one
-  command per tick, and a one-command reserve primed at join eats arrival
-  jitter before it ever prints into the timeline. Paced, never fabricated,
-  never dropped.
+- Client prediction with rewind + replay, 256-frame history. Inputs ride
+  one command per packet (40 B): on TCP the wire redelivers everything, so
+  Q3-style command redundancy buys nothing and only floods thin uplinks
+  (measured in `tests/link_sim.rs`).
+- Server-side input handling, Overwatch[^1]/Rocket League[^2] style: one
+  command per tick, no de-jitter buffer. When a command hasn't arrived by
+  its tick, the server extrapolates held intent (one-shot payloads
+  stripped, gravity keeps integrating — no mid-air freezes). Late commands
+  replace those guessed ticks through bounded per-player rollback, and
+  corrected snapshots revise remote interpolation history before it is
+  rendered.
 - Corrections you don't see: sub-3.5cm errors are accepted as-is, the rest
-  smooth in through a separate presentation entity, and only misses past
-  2.25m hard-snap. This is most of "smooth in a browser".
+  fold into a critically damped error bridge on a separate presentation
+  entity, and only teleport-class misses hard-snap (a 2.25m floor that
+  widens with speed, so a 3m correction mid-bhop at 30m/s still hides).
+  This is most of "smooth in a browser".
 - Rollback triggers on gameplay state too, not just position: a
   server-declined fire or disputed hit forces a replay at zero position error.
 
@@ -48,18 +62,28 @@ Sub-tick and lag compensation:
 - Predicted rockets are closed-form and sweep the whole gap since the last
   command, so they can't tunnel across lost packets. Self-knockback
   predicts: rocket jumps feel instant.
-- TF2-style player separation: rigid-body player collisions desync, so each
-  player pushes themselves away from intersecting players instead.
-  Deterministic via the lag-comp history, so it predicts rollback-free. And
-  you can shove people, which is fun.
+- Velocity-space player separation: rigid-body player collisions desync, so
+  each player clips their own approach velocity against intersecting players
+  and drains overlap as a capped velocity instead. Deterministic via the
+  lag-comp history, so it predicts rollback-free. And you can shove people,
+  which is fun.
 
 Remote players:
 
-- Cubic Hermite interpolation with snapshot velocities as tangents: a 20hz
-  jump arc renders as an arc, not chords. Falls back to lerp across gaps.
-- Capped extrapolation (0.25s, then hold), teleport detection, and a
-  rate-servo'd server clock, so snapshot jitter and clock drift never
-  render as stalls, crawls, or time snaps.
+- Source-style three-point cubic Hermite interpolation with tangents derived
+  from observed positions (never the published velocity): a 20hz jump arc
+  renders as an arc, not chords, and velocity stays continuous through
+  turns. Falls back to lerp across gaps.
+- Three-tick interpolation delay (150 ms: enough to eat one WebSocket
+  retransmit stall) followed by capped extrapolation (0.30s, then hold). The
+  playback clock advances exactly one server tick per fixed tick and slews a
+  few percent to re-center, so remotes never crawl or stutter after the 20 Hz
+  arrival staircase; a full outage holds, then resets in one jump.
+- Server-side input rollback revises remote history: a late command replaces
+  the guessed ticks and republishes them, and the viewer folds the revision
+  into a critically damped error bridge so the rendered path stays C1
+  (`tests/snapshot_sim.rs` measures hitches, stalls, and cap contact under
+  simulated loss).
 
 The rest:
 
@@ -69,7 +93,7 @@ The rest:
   is a fake network backend the unmodified client runs against. Speed,
   pause, spectator cam.
 - A deterministic seeded network conditioner (`--poor-net` is the video
-  above), cmd cadence and clock stats in the logs, slow-mo, F3 server-truth
+  above), clock/extrapolation stats in the logs, slow-mo, F3 server-truth
   ghosts, a wire-size regression test.
 - The example game: lag-compensated hitscan with predicted-vs-acked hit
   markers, an owner-authoritative buggy, predicted gravity-gun
@@ -141,11 +165,10 @@ things like weapon and ammo state from player state, and that was actually a
 bit of a mistake: it made maintaining the prediction and replay apparatus
 harder. Here, we got the better deal.
 
-The pmove does not run at Bevy's cadence, and that is the main gotcha here.
-The server may burn through several queued usercmds for one player in a
-single tick. The client replays whole bursts of commands after a correction.
-Every player is at a different point in time. Inside `player_think`, "now"
-means this command, not this frame.
+The client and server may replay whole bursts of commands after a correction, so inside
+`player_think`, "now" means this command, not this frame. The server is
+still exactly one new pmove per player per fixed tick; a late command can also
+rewind and replace bounded speculative ticks before that new step.
 
 So any state your predicted logic touches must ride along: captured into the
 prediction frame, restored on rewind, replayed per command, compared against
