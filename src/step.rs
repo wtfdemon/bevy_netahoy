@@ -70,6 +70,11 @@ pub struct NetAhoyStepper<'w, 's> {
 }
 
 impl NetAhoyStepper<'_, '_> {
+    /// The event outbox, for the server's post-step dedup pass.
+    pub(crate) fn events_mut(&mut self) -> &mut NetAhoyPlayerEvents {
+        &mut self.player_events
+    }
+
     /// Run one command through one movement step for one player. The infamous Quake `pmove`.
     /// `previous_sequence`/`previous_buttons` come from the last command actually
     /// stepped — the gap they leave against `command.sequence` is swept for
@@ -192,7 +197,28 @@ impl NetAhoyStepper<'_, '_> {
         }
 
         snapshot.state.apply_to_controller_state(&mut parts.state);
+        // After the move state: carry holds the authoritative timers (the
+        // grounded reset above is only a stand-in when carry is absent).
+        snapshot.carry.apply_to_controller_state(&mut parts.state);
         *parts.player_state = snapshot.player_state;
+    }
+
+    /// Restore an exact locally captured pmove frame. The server uses this to
+    /// replace a guessed input tick when its real command arrives late.
+    pub fn restore_frame(&mut self, entity: Entity, frame: &AhoyPredictionFrame) {
+        let mut players = self.set.p1();
+        let Ok(mut parts) = players.get_mut(entity) else {
+            return;
+        };
+
+        parts.transform.translation = frame.position;
+        parts.position.0 = frame.position;
+        parts.velocity.0 = frame.velocity;
+        parts.look.yaw = frame.look.x;
+        parts.look.pitch = frame.look.y;
+        *parts.state = frame.controller_state.clone();
+        *parts.input = frame.accumulated_input.clone();
+        *parts.player_state = frame.player_state;
     }
 
     pub fn position(&mut self, entity: Entity) -> Option<Vec3> {
@@ -201,6 +227,11 @@ impl NetAhoyStepper<'_, '_> {
             .get(entity)
             .ok()
             .map(|parts| parts.transform.translation)
+    }
+
+    pub fn velocity(&mut self, entity: Entity) -> Option<Vec3> {
+        let players = self.set.p1();
+        players.get(entity).ok().map(|parts| parts.velocity.0)
     }
 
     /// Drop held movement input without stepping, for ticks with no command.
