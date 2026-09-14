@@ -66,16 +66,12 @@ const MAX_DISTANCE: f32 = ROCKET_SPEED * LIFETIME_SECONDS;
 /// abusive stream and the fire is declined — both peers run the same step,
 /// so the decline predicts cleanly.
 const MAX_ROCKETS: usize = 16;
-/// Player-player contact, stiff but still velocity-space: on touch the
-/// approaching velocity component is clipped (you stop at their surface and
-/// slide, like a wall plane), and existing overlap drains at
-/// [`PLAYER_SEPARATION_BETA`] of full depth per tick, capped at
-/// [`PLAYER_SEPARATION_MAX_SPEED`]. Never positional: a velocity resolves
-/// through next tick's move_and_slide, so contact can't shove anyone through
-/// world geometry, and a misprediction is one tick of wrong velocity (the
-/// presentation bridge absorbs it), not a teleport.
-pub const PLAYER_SEPARATION_BETA: f32 = 0.4;
-pub const PLAYER_SEPARATION_MAX_SPEED: f32 = 9.0;
+/// Player-player separation, TF2 style: overlapping another player's cylinder
+/// adds up to this much horizontal speed directly away, fading linearly to
+/// zero at touch distance. Players are never hard-solid to each other — a
+/// wall at 20 Hz mispredicts sharply (hit or didn't), a force mispredicts
+/// smoothly.
+pub const PLAYER_PUSH_SPEED: f32 = 6.0;
 
 /// Refire delay: 16 ticks = 0.8 s at 20 Hz, the classic rocket cadence.
 pub const ROCKET_COOLDOWN_TICKS: u16 = 4;
@@ -314,9 +310,7 @@ pub struct NetAhoyPlayerState {
 ///
 /// Replay pushes events again for re-simulated commands, so a client consumer
 /// must dedupe by [`RocketId`] — "skip a fire whose visual exists, skip a
-/// blast whose visual doesn't" covers it. The server replays too (input
-/// rollback), and dedupes drained ids before any consumer reads the outbox
-/// ([`crate::server::SeenServerEvents`]).
+/// blast whose visual doesn't" covers it. The server never replays.
 #[derive(Resource, Default)]
 pub struct NetAhoyPlayerEvents {
     pub fired: Vec<RocketFired>,
@@ -396,19 +390,8 @@ pub fn step_player_state(
         // Dead-center overlap (spawn stacks) still needs a deterministic
         // way out; +X is as good as any and identical on both peers.
         let direction = if distance > 0.001 { flat / distance } else { Vec2::X };
-        let away = Vec3::new(direction.x, 0.0, direction.y);
-        // Solid core: clip the velocity component approaching the other
-        // player, exactly what move_and_slide does with a wall plane —
-        // you stop at their surface and keep the tangential slide.
-        let approach = -Vec3::new(velocity.x, 0.0, velocity.z).dot(away);
-        if approach > 0.0 {
-            *velocity += away * approach;
-        }
-        // Depenetration: drain existing overlap at a fraction of full depth
-        // per tick (positional projection expressed as velocity), capped so
-        // a spawn stack unstacks briskly without launching anyone.
-        let bias = (touch - distance) * FIXED_TIMESTEP_HZ as f32 * PLAYER_SEPARATION_BETA;
-        *velocity += away * bias.min(PLAYER_SEPARATION_MAX_SPEED);
+        let strength = PLAYER_PUSH_SPEED * (1.0 - distance / touch);
+        *velocity += Vec3::new(direction.x, 0.0, direction.y) * strength;
     }
 
     // `Some` is the press edge itself — no button-history comparison, no

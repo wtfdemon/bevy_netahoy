@@ -30,7 +30,6 @@ fn snapshot(rocket_count: usize) -> AhoySnapshot {
     let rockets = ActiveRockets::try_from(rockets).unwrap();
     AhoySnapshot {
         server_tick: 720_000, // one hour of uptime at 20 Hz
-        provisional: false,
         last_processed_sequence: 700_123,
         last_processed_buttons: AhoyButtons::JUMP,
         position: Vec3::new(12.5, 1.7, -33.2),
@@ -42,7 +41,6 @@ fn snapshot(rocket_count: usize) -> AhoySnapshot {
             mantle_height_left: None,
             crane_height_left: None,
         },
-        carry: default(),
         player_state: NetAhoyPlayerState {
             rockets,
             weapon: WeaponState {
@@ -81,9 +79,7 @@ fn print_wire_sizes() {
         seen_server_tick: 719_998,
         seen_alpha: 0.7,
     };
-    let packet = AhoyUserCmdPacket {
-        commands: vec![cmd; bevy_netahoy::client::DATAGRAM_USERCMD_BACKUP],
-    };
+    let packet = AhoyUserCmdPacket { commands: vec![cmd; 8] };
 
     let fired = RocketFired {
         id: RocketId { owner: PlayerId(123456), fired_sequence: 700_124 },
@@ -103,7 +99,7 @@ fn print_wire_sizes() {
         ("AhoySnapshot, 16 rockets", size(&worst)),
         ("PlayerSnapshot (all clients, per player)", player_snapshot),
         ("AhoyUserCmd (with fire)", size(&cmd)),
-        ("AhoyUserCmdPacket, full DATAGRAM_USERCMD_BACKUP tail", size(&packet)),
+        ("AhoyUserCmdPacket, 8 cmds", size(&packet)),
         ("RocketFired event", size(&fired)),
         ("RocketHit event", size(&hit)),
         ("BodySnapshot", size(&BodySnapshot {
