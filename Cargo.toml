@@ -2,8 +2,19 @@
 name = "bevy_netahoy"
 version = "0.1.0"
 edition = "2024"
-description = "Bevy netcode helpers for Ahoy-powered character controllers."
+# The lowest Bevy 0.19 builds on (edition 2024 and let chains alone need 1.88).
+rust-version = "1.95"
+description = "Client prediction, server input rollback and lag compensation for Bevy movement shooters on bevy_ahoy."
 readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wtfdemon/bevy_netahoy"
+keywords = ["bevy", "netcode", "prediction", "multiplayer", "gamedev"]
+categories = ["game-development", "network-programming"]
+
+[workspace]
+# The example's crate too, so `--workspace` builds, lints and tests the example game.
+members = [".", "examples/playground"]
+default-members = [".", "examples/playground"]
 
 [lints.clippy]
 # Bevy query/filter tuples routinely trip this; bevy upstream allows it too.
@@ -15,30 +26,85 @@ aeronet_replicon = { version = "0.21.0", default-features = false, features = ["
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32"] }
 bitflags = { version = "2", features = ["serde"] }
 bevy = { version = "0.19", default-features = false, features = ["async_executor", "bevy_log", "bevy_state", "multi_threaded", "serialize"] }
-bevy_ahoy = { git = "https://github.com/wtfdemon/bevy_ahoy.git", branch = "easy-strafe", default-features = false, features = ["serialize"] }
-bevy_replicon = { version = "0.41", default-features = false, features = ["client", "server"] }
+# The bevy_ahoy fork with the moves and movers (wtfdemon/bevy_ahoy, branch netahoy), beside this repo.
+bevy_ahoy = { path = "../bevy_ahoy", default-features = false, features = ["serialize"] }
+bevy_replicon = { version = "0.44.3", default-features = false, features = ["client", "server"] }
 serde = { version = "1.0", features = ["derive"] }
+# The transport features' WebSocket and WebTransport sessions, and the offer's JSON.
+aeronet_websocket = { version = "0.21.0", default-features = false, optional = true }
+aeronet_webtransport = { version = "0.21.0", default-features = false, optional = true }
+serde_json = { version = "1", optional = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+# aeronet_webtransport's own wtransport, with its quinn and ring: the transport server tunes QUIC
+# and makes and renews its own certificate.
+wtransport = { version = "0.7", default-features = false, features = ["quinn", "ring", "self-signed"], optional = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# The browser transport client finds its server from the page's address and asks it for its
+# WebTransport offer with the page's fetch.
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["Location", "Response", "Window"], optional = true }
+
+[features]
+# A client that connects over WebTransport first and falls back to WebSocket
+# (`transport::NetAhoyTransportClientPlugin`). Native and browser.
+transport-client = [
+    "dep:aeronet_websocket", "aeronet_websocket/client",
+    "dep:aeronet_webtransport", "aeronet_webtransport/client",
+    "dep:serde_json", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:web-sys",
+]
+# A server that listens on both, with its self-signed certificate and the offer endpoint
+# (`transport::NetAhoyTransportServerPlugin`). Native only: on wasm it adds nothing.
+transport-server = [
+    "dep:aeronet_websocket", "aeronet_websocket/server",
+    "dep:aeronet_webtransport", "aeronet_webtransport/server",
+    "aeronet_replicon/server", "dep:wtransport", "dep:serde_json",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dev-dependencies]
 aeronet_replicon = { version = "0.21.0", default-features = false, features = ["client", "server"] }
 aeronet_websocket = { version = "0.21.0", default-features = false, features = ["client", "server"] }
-ahoy_replicon = { path = "examples/ahoy_replicon" }
-# bevy 0.19 / avian 0.7 port, upstream PR #33 — swap to crates.io once released.
-avian_pickup = { git = "https://github.com/alexandre-v1/avian_pickup", branch = "bevy-0.19", default-features = false }
+playground = { path = "examples/playground" }
+# Network conditions (`--net=<preset|spec>`) and the client's F2 panel.
+bevy_egui = { version = "0.41", default-features = false, features = ["render", "default_fonts"] }
+bevy_link_conditioner = { git = "https://github.com/Smoked-Software/bevy_link_conditioner", rev = "7d83598ff780b34376c12e975f9e135d8ae2d54e", features = ["egui"] }
 bevy_enhanced_input = "0.26"
+# The playground client's text: signs, name tags, hit labels and the HUD.
+bevy_msdf_text = { git = "https://github.com/wtfdemon/bevy_msdf_text", rev = "e577b460d435dee84addf1d16b988a450c33fdeb" }
 postcard = { version = "1", features = ["alloc"] }
+serde_json = "1"
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+# The example client reads its settings from the page's address and its frame clock at the page's
+# vsync.
+web-sys = { version = "0.3", features = ["AnimationTimeline", "Document", "DocumentTimeline", "Location", "Performance", "Window"] }
 
 [[example]]
-name = "ahoy_client"
-path = "examples/ahoy_replicon/client.rs"
+name = "playground_client"
+path = "examples/playground/client/main.rs"
 
 [[example]]
-name = "ahoy_server"
-path = "examples/ahoy_replicon/server.rs"
+name = "playground_server"
+path = "examples/playground/server.rs"
 
-[profile.win-dev]
-inherits = "dev"
-strip = "debuginfo"
-
-[profile.win-dev.package."*"]
+[profile.dev.package."*"]
 opt-level = 3
+
+# wtfdemon/aeronet, branch wasm-newest-wins: aeronet on bevy_replicon 0.44, with send
+# backpressure (`SendBacklog`, `with_send_buffer_limit`), stale-fragment expiry, 64 KiB WebSocket
+# packets, and a browser WebTransport send loop that doesn't wait on each datagram's write (the
+# newest flush replaces one still waiting). All six: a partial patch leaves two aeronet_io, whose
+# sessions the other crates don't see. Patches apply only in the root workspace, so a game copies
+# this block.
+[patch.crates-io]
+aeronet = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }
+aeronet_io = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }
+aeronet_transport = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }
+aeronet_replicon = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }
+aeronet_webtransport = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }
+aeronet_websocket = { git = "https://github.com/wtfdemon/aeronet", rev = "aeb846c749717ea7ea3fdfc0b7f3f427c39ed8eb" }

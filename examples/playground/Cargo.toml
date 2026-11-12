@@ -1,0 +1,24 @@
+[package]
+name = "playground"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32"] }
+bevy = { version = "0.19", features = ["serialize"] }
+bevy_ahoy = { path = "../../../bevy_ahoy", default-features = false, features = ["serialize"] }
+# Both binaries' sessions: WebTransport first, WebSocket where it fails.
+bevy_netahoy = { path = "../..", features = ["transport-client"] }
+bevy_replicon = { version = "0.44.3", default-features = false, features = ["client", "server"] }
+serde = { version = "1.0", features = ["derive"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+bevy_netahoy = { path = "../..", features = ["transport-server"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# `?tick_hz=` from the page's address.
+web-sys = { version = "0.3", features = ["Location", "Window"] }

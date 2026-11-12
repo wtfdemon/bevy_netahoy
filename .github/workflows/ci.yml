@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The bevy_ahoy fork this crate depends on by path (../bevy_ahoy), checked out beside it.
+  AHOY_REPOSITORY: wtfdemon/bevy_ahoy
+  AHOY_REF: netahoy
+  CARGO_TERM_COLOR: always
+
+# The jobs that build fetch Cargo.toml's git dependencies, the aeronet fork and the dev-dependency
+# bevy_link_conditioner: their repositories must be public.
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bevy_netahoy
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AHOY_REPOSITORY }}
+          ref: ${{ env.AHOY_REF }}
+          path: bevy_ahoy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+        working-directory: bevy_netahoy
+
+  clippy:
+    name: Clippy and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bevy_netahoy
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AHOY_REPOSITORY }}
+          ref: ${{ env.AHOY_REF }}
+          path: bevy_ahoy
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bevy_netahoy -> target
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        working-directory: bevy_netahoy
+      - run: cargo doc --locked --no-deps --workspace
+        working-directory: bevy_netahoy
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bevy_netahoy
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AHOY_REPOSITORY }}
+          ref: ${{ env.AHOY_REF }}
+          path: bevy_ahoy
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bevy_netahoy -> target
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - run: cargo nextest run --locked --workspace
+        working-directory: bevy_netahoy
+
+  wasm:
+    name: Browser client check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: bevy_netahoy
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AHOY_REPOSITORY }}
+          ref: ${{ env.AHOY_REF }}
+          path: bevy_ahoy
+      - uses: dtolnay/rust-toolchain@stable
+      - run: rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bevy_netahoy -> target
+      - run: cargo check --locked --target wasm32-unknown-unknown --example ahoy_client
+        working-directory: bevy_netahoy

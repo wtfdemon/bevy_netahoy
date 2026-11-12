@@ -52,7 +52,34 @@
 <body>
     <div id="status">Starting NetAhoy...</div>
     <script type="module">
-        import init from './wasm/ahoy_client.js';
+        import init from './playground_client.js';
+
+        // Every WebTransport session drops an upstream datagram that waited 50 ms in the browser
+        // instead of sending it late: the next one repeats the same unacked commands.
+        if (window.WebTransport) {
+            const BrowserWebTransport = window.WebTransport;
+            window.WebTransport = class extends BrowserWebTransport {
+                constructor(url, options) {
+                    super(url, options);
+                    if ('outgoingMaxAge' in this.datagrams) this.datagrams.outgoingMaxAge = 50;
+                }
+            };
+        }
+
+        // winit calls a plain requestPointerLock() (winit#3547), which in Chromium takes the
+        // cursor-derived mouse path: OS acceleration and bogus movementX/Y spikes that throw the
+        // camera (crbug 40547981). Ask for the raw path instead; where it isn't supported, fall
+        // back to the plain lock. A second request while one is pending (winit asks again a frame
+        // later) fails with "pending" and is nobody's error.
+        const plainLock = Element.prototype.requestPointerLock;
+        Element.prototype.requestPointerLock = function (options) {
+            const request = plainLock?.call(this, { unadjustedMovement: true, ...options });
+            return request?.catch((error) => {
+                if (/pending/i.test(error.message)) return;
+                if (error.name !== 'NotSupportedError') throw error;
+                return plainLock.call(this);
+            });
+        };
 
         const status = document.getElementById('status');
 

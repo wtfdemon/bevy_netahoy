@@ -1,0 +1,2 @@
+# Bevy systems routinely take 8-9 params; past that, group them in a struct or SystemParam.
+too-many-arguments-threshold = 9

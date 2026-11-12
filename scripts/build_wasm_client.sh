@@ -3,9 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-OUT_DIR="web/wasm"
-WASM_IN="target/wasm32-unknown-unknown/release/examples/ahoy_client.wasm"
-WASM_OUT="${OUT_DIR}/ahoy_client_bg.wasm"
+OUT_DIR="web"
+WASM_IN="target/wasm32-unknown-unknown/release/examples/playground_client.wasm"
+WASM_OUT="${OUT_DIR}/playground_client_bg.wasm"
 
 WASM_BINDGEN_VERSION=$(
     awk '
@@ -35,7 +35,7 @@ else
     BINDGEN_BIN="${LOCAL_BINDGEN}"
 fi
 
-if [[ ! -x "${BINDGEN_BIN}" ]]; then
+if [[ "${BINDGEN_BIN}" == "${LOCAL_BINDGEN}" && ! -x "${LOCAL_BINDGEN}" ]]; then
     echo "Installing wasm-bindgen-cli ${WASM_BINDGEN_VERSION} locally..."
     cargo install \
         --root "target/wasm-bindgen-cli/${WASM_BINDGEN_VERSION}" \
@@ -45,8 +45,8 @@ fi
 
 mkdir -p "${OUT_DIR}"
 
-echo "Building ahoy_client for WASM..."
-cargo build --release --target wasm32-unknown-unknown --example ahoy_client
+echo "Building playground_client for WASM..."
+cargo build --release --target wasm32-unknown-unknown --example playground_client
 
 echo "Generating JS bindings..."
 "${BINDGEN_BIN}" \

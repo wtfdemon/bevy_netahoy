@@ -1,3 +1,5 @@
 /target
 /notes
-/web/wasm
+/web/playground_client.js
+/web/playground_client_bg.wasm
+*.ahoydem
